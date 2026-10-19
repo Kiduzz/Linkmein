@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { overlapScore } from "../server/ai/originality.js";
+import { overlapScore } from "../shared/ai/originality.js";
 
 const source = "I got rejected from 40 jobs last year. Here is what the 41st application taught me about writing a resume.";
 

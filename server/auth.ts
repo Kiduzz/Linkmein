@@ -1,9 +1,9 @@
+import crypto from "node:crypto";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { config, linkedinConfigured } from "./config.js";
-import { get, now, run, type UserRow } from "./db.js";
-import { randomToken, sha256 } from "./crypto.js";
+import { randomToken } from "./crypto.js";
 import { authorizeUrl, exchangeCode, fetchUserInfo } from "./linkedin.js";
-import { getUser, upsertLinkedInUser } from "./users.js";
+import { upsertAccount } from "./accounts.js";
 
 const SESSION_COOKIE = "lmi_session";
 const STATE_COOKIE = "lmi_oauth_state";
@@ -13,7 +13,8 @@ declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      user?: UserRow;
+      /** The signed-in LinkedIn account's storage key. */
+      accountKey?: string;
     }
   }
 }
@@ -25,24 +26,41 @@ const cookieOptions = () => ({
   path: "/",
 });
 
-export async function createSession(res: Response, userId: number): Promise<void> {
-  const token = randomToken();
-  await run("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)", [sha256(token), userId, now() + SESSION_TTL_MS]);
-  res.cookie(SESSION_COOKIE, token, { ...cookieOptions(), maxAge: SESSION_TTL_MS });
+// Sessions are stateless signed cookies, so the server needs no session table.
+const sign = (data: string) => crypto.createHmac("sha256", `session:${config.appSecret}`).update(data).digest("base64url");
+
+export function sessionToken(accountKey: string, expiresAt = Date.now() + SESSION_TTL_MS): string {
+  const data = Buffer.from(JSON.stringify({ a: accountKey, e: expiresAt })).toString("base64url");
+  return `${data}.${sign(data)}`;
 }
 
-/** Attaches req.user when the session cookie is valid. */
-export async function loadSession(req: Request, _res: Response, next: NextFunction): Promise<void> {
-  const token = req.cookies?.[SESSION_COOKIE];
-  if (typeof token === "string" && token) {
-    const row = await get<{ user_id: number; expires_at: number }>("SELECT user_id, expires_at FROM sessions WHERE token_hash = ?", [sha256(token)]);
-    if (row && row.expires_at > now()) req.user = await getUser(row.user_id);
+export function readSessionToken(token: string): string | null {
+  const [data, mac] = token.split(".");
+  if (!data || !mac) return null;
+  const expected = Buffer.from(sign(data));
+  const given = Buffer.from(mac);
+  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
+  try {
+    const { a, e } = JSON.parse(Buffer.from(data, "base64url").toString()) as { a: string; e: number };
+    return typeof a === "string" && e > Date.now() ? a : null;
+  } catch {
+    return null;
   }
+}
+
+export function createSession(res: Response, accountKey: string): void {
+  res.cookie(SESSION_COOKIE, sessionToken(accountKey), { ...cookieOptions(), maxAge: SESSION_TTL_MS });
+}
+
+/** Attaches req.accountKey when the session cookie is valid. */
+export function loadSession(req: Request, _res: Response, next: NextFunction): void {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (typeof token === "string" && token) req.accountKey = readSessionToken(token) ?? undefined;
   next();
 }
 
 export function requireUser(req: Request, res: Response, next: NextFunction): void {
-  if (!req.user) {
+  if (!req.accountKey) {
     res.status(401).json({ error: "Not signed in" });
     return;
   }
@@ -88,8 +106,8 @@ authRouter.get("/linkedin/callback", async (req, res) => {
   try {
     const tokens = await exchangeCode(code);
     const info = await fetchUserInfo(tokens.accessToken);
-    const user = await upsertLinkedInUser(info, tokens);
-    await createSession(res, user.id);
+    const account = await upsertAccount(info, tokens);
+    createSession(res, account.key);
     res.redirect(`${config.webUrl}/`);
   } catch (err) {
     console.error("LinkedIn sign-in failed", err);
@@ -103,14 +121,12 @@ authRouter.post("/dev-login", async (_req, res) => {
     res.status(404).end();
     return;
   }
-  const user = await upsertLinkedInUser({ sub: "dev-user", name: "Dev User", email: null, picture: null }, null);
-  await createSession(res, user.id);
+  const account = await upsertAccount({ sub: "dev-user", name: "Dev User", email: null, picture: null }, null);
+  createSession(res, account.key);
   res.json({ ok: true });
 });
 
-authRouter.post("/logout", async (req, res) => {
-  const token = req.cookies?.[SESSION_COOKIE];
-  if (typeof token === "string") await run("DELETE FROM sessions WHERE token_hash = ?", [sha256(token)]);
+authRouter.post("/logout", (_req, res) => {
   res.clearCookie(SESSION_COOKIE, cookieOptions());
   res.json({ ok: true });
 });

@@ -22,8 +22,8 @@ const onVercel = Boolean(process.env.VERCEL);
 const dataDir = path.resolve(env("DATA_DIR", "./data"));
 
 /**
- * The secret used to encrypt API keys and LinkedIn tokens at rest. Self-hosted, we
- * generate one once and keep it next to the database. On Vercel there's no disk to
+ * The secret that encrypts LinkedIn tokens at rest and signs sessions. Self-hosted, we
+ * generate one once and keep it in DATA_DIR. On Vercel there's no disk to
  * keep it on, so it must be set.
  */
 function loadAppSecret(): string {
@@ -37,11 +37,10 @@ function loadAppSecret(): string {
   return generated;
 }
 
-// Vercel has no persistent disk, so the database, file storage and secret must all be external.
+// Vercel has no persistent disk, so the publish queue's storage and the secret must be external.
 if (onVercel) {
   const missing = [
     !env("APP_SECRET") && "APP_SECRET",
-    !(env("DATABASE_URL") || env("TURSO_DATABASE_URL")) && "TURSO_DATABASE_URL (and TURSO_AUTH_TOKEN)",
     !env("BLOB_READ_WRITE_TOKEN") && "BLOB_READ_WRITE_TOKEN (connect a Blob store)",
   ].filter(Boolean);
   if (missing.length) throw new Error(`Linkmein on Vercel is missing: ${missing.join(", ")}. See docs/deploy-vercel.md.`);
@@ -57,12 +56,8 @@ export const config = {
   onVercel,
   isProduction: env("NODE_ENV") === "production",
   dataDir,
-  uploadDir: path.join(dataDir, "uploads"),
-  database: {
-    url: env("DATABASE_URL") || env("TURSO_DATABASE_URL") || `file:${path.join(dataDir, "linkmein.db")}`,
-    authToken: env("DATABASE_AUTH_TOKEN") || env("TURSO_AUTH_TOKEN") || undefined,
-  },
-  /** Vercel Blob when its token is present, otherwise files on local disk. */
+  storageDir: path.join(dataDir, "storage"),
+  /** Where the publish queue and LinkedIn connections live: Vercel Blob when its token is present, otherwise local disk. */
   storage: env("BLOB_READ_WRITE_TOKEN") ? ("blob" as const) : ("local" as const),
   appSecret: loadAppSecret(),
   /** Where the browser should land after login. In dev the Vite server runs on another port. */
@@ -78,10 +73,7 @@ export const config = {
     /** When true, publishing is simulated: nothing is sent to LinkedIn. */
     dryRun: env("LINKEDIN_DRY_RUN") === "true",
   },
-  ai: {
-    defaultModel: env("DEFAULT_MODEL", "claude-opus-5-5"),
-  },
-  /** Per-file limit. On Vercel, publishing a video must finish within one 5-minute function run. */
+  /** Per-file limit for media attached to scheduled posts. On Vercel, publishing a video must finish within one 5-minute function run. */
   maxUploadMb: Number(env("MAX_UPLOAD_MB", onVercel ? "200" : "500")),
   schedulerIntervalMs: Number(env("SCHEDULER_INTERVAL_MS", "30000")),
 };

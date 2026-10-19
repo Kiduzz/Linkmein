@@ -1,25 +1,19 @@
 import { useState } from "react";
 import { api, mediaUrl, previewUrl, type Media } from "../api";
-import { useApp } from "../context";
 import { useMediaLibrary } from "../hooks";
 import { MediaTray } from "../components/MediaTray";
 import { formatDuration, PageHeader, Spinner, StatusChip } from "../components/ui";
 import { describeJob, resumeTranscription, useTranscriptionJobs } from "../media/transcriber";
 
 export function LibraryPage() {
-  const { config } = useApp();
   const { media, loaded, refresh } = useMediaLibrary();
   const [justAdded, setJustAdded] = useState<number[]>([]);
   const usedMb = media.reduce((sum, m) => sum + m.size, 0) / 1024 / 1024;
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Library" subtitle="Everything you've uploaded. Fix transcripts and alt text here; Claude uses them when writing.">
-        {media.length > 0 && (
-          <span className="text-sm text-slate-500" title={config.storage === "blob" ? "Vercel Blob's free plan includes 1 GB of storage" : undefined}>
-            {usedMb < 1 ? "<1" : usedMb.toFixed(0)} MB used{config.storage === "blob" ? " of 1 GB free" : ""}
-          </span>
-        )}
+      <PageHeader title="Library" subtitle="Everything you've added, stored on this device. Fix transcripts and alt text here; Claude uses them when writing.">
+        {media.length > 0 && <span className="text-sm text-slate-500">{usedMb < 1 ? "<1" : usedMb.toFixed(0)} MB on this device</span>}
       </PageHeader>
       <MediaTray library={[]} refresh={refresh} selected={justAdded} onChange={setJustAdded} label="Add media" />
       {loaded && !media.length && <p className="text-sm text-slate-500">Nothing here yet.</p>}

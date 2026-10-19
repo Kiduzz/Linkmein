@@ -88,7 +88,7 @@ export function RemixPage() {
 }
 
 function AddInspiration({ onAdded, onCancel }: { onAdded: (i: Inspiration) => void; onCancel?: () => void }) {
-  const { me, config } = useApp();
+  const { me } = useApp();
   const [text, setText] = useState("");
   const [author, setAuthor] = useState("");
   const [url, setUrl] = useState("");
@@ -99,7 +99,7 @@ function AddInspiration({ onAdded, onCancel }: { onAdded: (i: Inspiration) => vo
   const submit = () =>
     action.run(async () => {
       let screenshotMediaId: number | undefined;
-      if (screenshot) screenshotMediaId = (await uploadMedia(screenshot, me.user.id, config)).id;
+      if (screenshot) screenshotMediaId = (await uploadMedia(screenshot)).id;
       onAdded(await api.addInspiration({ text, author: author || undefined, url: url || undefined, screenshotMediaId }));
     });
 

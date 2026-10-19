@@ -1,10 +1,9 @@
-import { upload as blobUpload } from "@vercel/blob/client";
-import { api, type AppConfig, type Media } from "../api";
+import { api, type Media } from "../api";
 import { transcribe } from "./transcriber";
 
-// Prepares files in the browser before upload: photos are resized (and stripped of
-// location metadata), frames are sampled from videos, and speech is queued for
-// transcription. Then everything goes straight to storage and gets registered.
+// Prepares files on this device: photos are resized (and stripped of location
+// metadata), frames are sampled from videos, and speech is queued for
+// transcription. Everything is saved in the browser's own storage.
 
 const AI_IMAGE_MAX = 1568; // Claude's vision sweet spot on the long edge
 const POST_IMAGE_MAX = 4096; // plenty for LinkedIn, and keeps storage small
@@ -113,83 +112,81 @@ async function audioDuration(file: File): Promise<number | undefined> {
   }
 }
 
-async function put(config: AppConfig, key: string, body: Blob): Promise<void> {
-  if (config.storage === "blob") {
-    await blobUpload(key, body, {
-      access: "private",
-      handleUploadUrl: "/api/blob/upload",
-      headers: { "X-Linkmein": "1" },
-      contentType: body.type || "application/octet-stream",
-      multipart: body.size > 20 * 1024 * 1024,
-    });
-    return;
-  }
-  const res = await fetch(`/api/uploads/${key}`, {
-    method: "PUT",
-    headers: { "X-Linkmein": "1", "Content-Type": body.type || "application/octet-stream" },
-    body,
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `Upload failed (${res.status})`);
-}
+const base = (m: { name: string; mime: string; size: number }) => ({
+  name: m.name,
+  mime: m.mime,
+  size: m.size,
+  error: null as string | null,
+  transcript: null as string | null,
+  altText: null as string | null,
+  durationS: null as number | null,
+  width: null as number | null,
+  height: null as number | null,
+  hasPreview: false,
+  createdAt: Date.now(),
+});
 
-function extension(file: Blob, fallback: string): string {
-  const fromType = file.type.split("/")[1]?.split(";")[0]?.replace("jpeg", "jpg").replace("quicktime", "mov").replace("x-m4a", "m4a");
-  return (fromType && /^[a-z0-9]{2,5}$/.test(fromType) ? fromType : fallback).toLowerCase();
-}
-
-/** Prepares, uploads and registers one file. Speech transcription continues in the background. */
-export async function uploadMedia(file: File, userId: number, config: AppConfig): Promise<Media> {
+/** Prepares and saves one file. Speech transcription continues in the background. */
+export async function uploadMedia(file: File): Promise<Media> {
   const kind = kindOf(file);
   if (!kind) throw new Error(`"${file.name}" isn't a photo, video or audio file.`);
-  if (file.size > config.maxUploadMb * 1024 * 1024) throw new Error(`"${file.name}" is over the ${config.maxUploadMb} MB limit.`);
-  const dir = `u/${userId}/${crypto.randomUUID()}`;
   const name = file.name.slice(0, 200) || `${kind} upload`;
 
   if (kind === "image") {
     const img = await prepareImage(file);
-    const fileKey = `${dir}/original.${extension(img.original, "jpg")}`;
-    await Promise.all([put(config, fileKey, img.original), put(config, `${dir}/preview.jpg`, img.preview)]);
-    return api.registerMedia({ kind, name, mime: img.original.type, fileKey, previewKey: `${dir}/preview.jpg`, width: img.width, height: img.height, status: "ready" });
+    return api.addMedia({
+      ...base({ name, mime: img.original.type, size: img.original.size }),
+      kind,
+      status: "ready",
+      width: img.width,
+      height: img.height,
+      blob: img.original,
+      preview: img.preview,
+      frames: [],
+      hasPreview: true,
+    });
   }
 
   const mime = file.type || (kind === "video" ? "video/mp4" : "audio/mp4");
-  const fileKey = `${dir}/original.${extension(file, kind === "video" ? "mp4" : "m4a")}`;
-
   if (kind === "video") {
     const v = await prepareVideo(file);
-    const frameKeys = v.frames.map((_, i) => `${dir}/frame-${i}.jpg`);
-    await Promise.all([put(config, fileKey, file), ...v.frames.map((f, i) => put(config, frameKeys[i], f))]);
-    const media = await api.registerMedia({
+    const media = await api.addMedia({
+      ...base({ name, mime, size: file.size }),
       kind,
-      name,
-      mime,
-      fileKey,
-      frameKeys,
-      previewKey: frameKeys[0],
-      durationS: v.durationS,
-      width: v.width,
-      height: v.height,
       status: "processing",
-      error: v.error,
+      error: v.error ?? null,
+      durationS: v.durationS ?? null,
+      width: v.width ?? null,
+      height: v.height ?? null,
+      blob: file,
+      preview: v.frames[0] ?? null,
+      frames: v.frames,
+      hasPreview: v.frames.length > 0,
     });
     transcribe(media.id, file);
     return media;
   }
 
-  const durationS = await audioDuration(file);
-  await put(config, fileKey, file);
-  const media = await api.registerMedia({ kind, name, mime, fileKey, durationS, status: "processing" });
+  const media = await api.addMedia({
+    ...base({ name, mime, size: file.size }),
+    kind,
+    status: "processing",
+    durationS: (await audioDuration(file)) ?? null,
+    blob: file,
+    preview: null,
+    frames: [],
+  });
   transcribe(media.id, file);
   return media;
 }
 
-/** Uploads several files one by one, collecting successes and the first error. */
-export async function uploadMany(files: File[], userId: number, config: AppConfig): Promise<{ media: Media[]; error: string | null }> {
+/** Saves several files one by one, collecting successes and any errors. */
+export async function uploadMany(files: File[]): Promise<{ media: Media[]; error: string | null }> {
   const media: Media[] = [];
   const errors: string[] = [];
   for (const f of files) {
     try {
-      media.push(await uploadMedia(f, userId, config));
+      media.push(await uploadMedia(f));
     } catch (err) {
       errors.push((err as Error).message);
     }

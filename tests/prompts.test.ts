@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorContext, splitSamples } from "../server/ai/prompts.js";
+import { authorContext, splitSamples } from "../shared/ai/prompts.js";
 
 describe("prompts", () => {
   it("splits writing samples on --- lines", () => {

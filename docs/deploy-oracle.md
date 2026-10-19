@@ -6,7 +6,7 @@ What you end up with:
 
 - Linkmein at `https://your-domain`, with a free HTTPS certificate that renews itself
 - Scheduled posts that publish around the clock, whether your own computer is on or not
-- Your data in one folder on the server, easy to back up
+- Only your LinkedIn connection and posts waiting to go out on the server; everything else stays on your phone
 
 ## 1. Create an Oracle Cloud account
 
@@ -129,7 +129,7 @@ docker compose --profile https up -d --build
 
 ## Backups
 
-Everything lives in `~/linkmein/data`: the database, your uploads, and `app-secret.key`. To make a backup on the server:
+The server's files live in `~/linkmein/data`: LinkedIn connections, the publish queue, and `app-secret.key`. Your profile, media and drafts are on your phone; back those up from **Settings → Download backup** in the app. To back up the server's part:
 
 ```bash
 cd ~/linkmein && tar czf ~/linkmein-backup-$(date +%F).tar.gz data
@@ -141,7 +141,7 @@ Then copy it to your own computer:
 scp -i ~/Downloads/ssh-key-*.key ubuntu@YOUR_PUBLIC_IP:~/linkmein-backup-*.tar.gz .
 ```
 
-Keep backups private. `app-secret.key` decrypts the stored API keys and LinkedIn tokens.
+Keep backups private. `app-secret.key` decrypts the stored LinkedIn tokens.
 
 ## Things to know
 

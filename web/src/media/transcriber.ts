@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { api, mediaUrl, type Media } from "../api";
+import { api, type Media } from "../api";
 
 // A queue of browser-side transcriptions that survives page navigation. Each
 // finished transcript is saved to the server; until then the media is "processing".
@@ -101,10 +101,9 @@ export async function resumeTranscription(m: Media): Promise<void> {
   if (jobs.has(m.id)) return;
   set(m.id, { stage: "queued" });
   try {
-    const res = await fetch(mediaUrl(m.id));
-    if (!res.ok) throw new Error(`Couldn't download ${m.name}`);
+    const blob = await api.mediaBlob(m.id);
     jobs.delete(m.id);
-    transcribe(m.id, await res.blob());
+    transcribe(m.id, blob);
   } catch (err) {
     set(m.id, null);
     throw err;

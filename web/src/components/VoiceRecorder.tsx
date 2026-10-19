@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type { Media } from "../api";
-import { useApp } from "../context";
 import { uploadMedia } from "../media/process";
 
 function pickMime(): string {
@@ -12,7 +11,6 @@ function pickMime(): string {
 
 /** Records a voice note in the browser and uploads it for transcription. */
 export function VoiceRecorder({ onUploaded }: { onUploaded: (m: Media[]) => void }) {
-  const { me, config } = useApp();
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +42,7 @@ export function VoiceRecorder({ onUploaded }: { onUploaded: (m: Media[]) => void
         setUploading(true);
         try {
           const file = new File([blob], `Voice note ${new Date().toLocaleString()}.${ext}`, { type });
-          onUploaded([await uploadMedia(file, me.user.id, config)]);
+          onUploaded([await uploadMedia(file)]);
         } catch (err) {
           setError((err as Error).message);
         } finally {

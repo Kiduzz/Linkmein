@@ -1,25 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MediaRow, UserRow } from "../server/db.js";
+import type { StoredMedia } from "../web/src/local/db";
+import type { AiContext } from "../web/src/ai/claude";
 
 const calls: { system: string; content: any[] }[] = [];
 let reply: unknown;
-vi.mock("../server/ai/claude.js", async (orig) => ({
-  ...(await orig<typeof import("../server/ai/claude.js")>()),
+vi.mock("../web/src/ai/claude", async (orig) => ({
+  ...(await orig<typeof import("../web/src/ai/claude")>()),
   structured: vi.fn(async (_user: unknown, req: { system: string; content: any[] }) => {
     calls.push(req);
     return typeof reply === "function" ? (reply as () => unknown)() : reply;
   }),
 }));
 
-const { generatePosts, remixPosts } = await import("../server/ai/generate.js");
-const { storeFile } = await import("./helpers.js");
+const { generatePosts, remixPosts } = await import("../web/src/ai/generate");
 
-const user = { id: 1, name: "Ada" } as UserRow;
-const preview = "u/1/0000aaaa-test/preview.jpg";
-await storeFile(preview, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+const user: AiContext = { name: "Ada", apiKey: "sk-test", model: "claude-opus-5-5" };
+const preview = new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: "image/jpeg" });
 
-const media = (over: Partial<MediaRow>): MediaRow =>
-  ({ id: 1, kind: "image", original_name: "a.jpg", status: "ready", preview_key: preview, frame_keys: null, transcript: null, duration_s: null, ...over }) as MediaRow;
+const media = (over: Partial<StoredMedia>): StoredMedia =>
+  ({ id: 1, kind: "image", name: "a.jpg", status: "ready", preview, frames: [], blob: preview, transcript: null, durationS: null, ...over }) as StoredMedia;
 
 beforeEach(() => {
   calls.length = 0;
@@ -33,7 +32,7 @@ describe("generatePosts", () => {
       { headline: "Chef", writingSamples: "my old post" },
       [
         media({ id: 1 }),
-        media({ id: 2, kind: "video", frame_keys: JSON.stringify([preview, preview]), transcript: "we opened the kitchen", duration_s: 12 }),
+        media({ id: 2, kind: "video", frames: [preview, preview], transcript: "we opened the kitchen", durationS: 12 }),
         media({ id: 3, kind: "audio", transcript: "voice note about our menu" }),
       ],
       { mediaIds: [1, 2, 3], notes: "Opening week", variations: 2 },
@@ -60,7 +59,7 @@ describe("generatePosts", () => {
 
 describe("remixPosts", () => {
   const source = "I got rejected from 40 jobs last year. Here is what the 41st application taught me about writing a resume that works.";
-  const inspiration = { id: 1, user_id: 1, source_text: source, source_author: "Someone", source_url: null, image_media_id: null, analysis: null, created_at: 0 };
+  const inspiration = { id: 1, text: source, author: "Someone", url: null, screenshotMediaId: null, analysis: null, createdAt: 0 };
 
   it("scores overlap and retries drafts that copy the reference", async () => {
     let n = 0;

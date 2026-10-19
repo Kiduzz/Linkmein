@@ -1,4 +1,4 @@
-import type { Profile, PostLength } from "../../shared/types.js";
+import type { Profile, PostLength } from "../types.js";
 
 const LENGTHS: Record<PostLength, string> = {
   short: "Short: 40-90 words.",

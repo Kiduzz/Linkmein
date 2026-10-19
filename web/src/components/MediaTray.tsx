@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import type { Media } from "../api";
-import { useApp } from "../context";
 import { uploadMany } from "../media/process";
 import { describeJob, resumeTranscription, useTranscriptionJobs } from "../media/transcriber";
 import { MediaThumb } from "./MediaThumb";
@@ -17,7 +16,6 @@ interface Props {
 
 /** Pick the material Claude should write from: upload, record, or choose from the library. */
 export function MediaTray({ library, refresh, selected, onChange, label = "Material" }: Props) {
-  const { me, config } = useApp();
   const jobs = useTranscriptionJobs();
   const input = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -38,7 +36,7 @@ export function MediaTray({ library, refresh, selected, onChange, label = "Mater
     setUploading(true);
     setError(null);
     try {
-      const result = await uploadMany(files, me.user.id, config);
+      const result = await uploadMany(files);
       setError(result.error);
       if (result.media.length) await added(result.media);
     } finally {

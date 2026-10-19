@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { exportBackup, importBackup } from "../local/backup";
 import { useApp } from "../context";
 import { useAction } from "../hooks";
 import { ErrorText, formatWhen, PageHeader, Spinner } from "../components/ui";
@@ -48,7 +49,7 @@ export function SettingsPage() {
             <a className="text-brand-700 underline" href="https://platform.claude.com/settings/keys" target="_blank" rel="noreferrer">
               platform.claude.com
             </a>
-            . A Claude.ai chat subscription doesn't include API access. The key is encrypted on this server and never sent to your browser.
+            . A Claude.ai chat subscription doesn't include API access. Your key is stored only on this device and sent straight to Anthropic, never to the Linkmein server.
           </p>
         </div>
         {me.settings.hasApiKey && (
@@ -120,6 +121,82 @@ export function SettingsPage() {
           </a>
         )}
       </section>
+
+      <DeviceData />
     </div>
+  );
+}
+
+/** Data lives in this browser, so offer a way to back it up and move it. */
+function DeviceData() {
+  const [usage, setUsage] = useState<{ usedMb: number; persisted: boolean } | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const action = useAction();
+
+  useEffect(() => {
+    void (async () => {
+      const estimate = await navigator.storage?.estimate?.().catch(() => undefined);
+      const persisted = (await navigator.storage?.persisted?.().catch(() => false)) ?? false;
+      setUsage({ usedMb: (estimate?.usage ?? 0) / 1024 / 1024, persisted });
+    })();
+  }, [message]);
+
+  const download = () =>
+    action.run(async () => {
+      const blob = await exportBackup();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `linkmein-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+      setMessage("Backup downloaded.");
+    });
+
+  const restore = (file: File) =>
+    action.run(async () => {
+      if (!window.confirm("Replace everything on this device with this backup? Your Claude key stays as it is.")) return;
+      const result = await importBackup(file);
+      setMessage(`Restored ${result.posts} posts and ${result.media} media files.`);
+    });
+
+  return (
+    <section className="card space-y-3 p-5">
+      <h2 className="font-semibold">Your data on this device</h2>
+      <p className="text-sm text-slate-700">
+        Your profile, Claude key, media and posts are stored in this browser, not on a server. Only posts you schedule are handed to the server, and
+        their files are deleted once they're published.
+      </p>
+      {usage && (
+        <p className="text-sm text-slate-600">
+          Using {usage.usedMb < 1 ? "under 1" : usage.usedMb.toFixed(0)} MB.{" "}
+          {usage.persisted ? "The browser won't clear it to free up space." : "Add Linkmein to your home screen so the browser keeps it safe."}
+        </p>
+      )}
+      <p className="text-xs text-slate-500">
+        Clearing your browser's data for this site deletes it. Download a backup now and then; you can also use one to move to a new phone.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <button className="btn-secondary" disabled={action.busy} onClick={download}>
+          {action.busy ? <Spinner /> : null} Download backup
+        </button>
+        <button className="btn-ghost" disabled={action.busy} onClick={() => input.current?.click()}>
+          Restore from backup
+        </button>
+        <input
+          ref={input}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void restore(f);
+            e.target.value = "";
+          }}
+        />
+      </div>
+      {message && <p className="text-sm text-emerald-700">{message}</p>}
+      <ErrorText error={action.error} />
+    </section>
   );
 }

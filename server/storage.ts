@@ -1,26 +1,29 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import type { Readable } from "node:stream";
-import { del, get, head, issueSignedToken, presignUrl, type IssuedSignedToken } from "@vercel/blob";
+import { BlobPreconditionFailedError, del, get, head, issueSignedToken, presignUrl, put, type IssuedSignedToken } from "@vercel/blob";
 import { config } from "./config.js";
 
-// Uploaded files live under keys like "u/<userId>/<uuid>/<name>", either on local
-// disk (self-hosted) or in a private Vercel Blob store. The browser uploads directly
-// to storage; the server only ever reads, signs and deletes.
+// The server keeps very little: LinkedIn connections, the publish queue, and the
+// files of posts waiting to go out. It lives on local disk (self-hosted) or in a
+// private Vercel Blob store. Everything else stays on the user's phone.
 
-const KEY = /^u\/(\d+)\/[A-Za-z0-9-]{8,64}\/[A-Za-z0-9._-]{1,80}$/;
+const SEGMENT = /^[A-Za-z0-9._-]{1,80}$/;
+const UPLOAD_KEY = /^u\/([a-f0-9]{24})\/[A-Za-z0-9-]{8,64}\/[A-Za-z0-9._-]{1,80}$/;
 
-/** True if `key` is a well-formed storage key belonging to this user. */
-export function ownsKey(userId: number, key: string): boolean {
-  const m = KEY.exec(key);
-  return Boolean(m && Number(m[1]) === userId && !key.includes(".."));
+/** True if `key` is a well-formed upload key in this account's folder. */
+export function ownsKey(accountKey: string, key: string): boolean {
+  const m = UPLOAD_KEY.exec(key);
+  return Boolean(m && m[1] === accountKey && !key.includes(".."));
 }
 
 function localPath(key: string): string {
-  if (!KEY.test(key)) throw new Error(`Invalid storage key: ${key}`);
-  return path.join(config.uploadDir, ...key.split("/"));
+  const parts = key.split("/");
+  if (!parts.every((p) => SEGMENT.test(p) && p !== "." && p !== "..")) throw new Error(`Invalid storage key: ${key}`);
+  return path.join(config.storageDir, ...parts);
 }
 
 export class TooLargeError extends Error {}
@@ -61,7 +64,7 @@ export async function sizeOf(key: string): Promise<number | null> {
 
 export async function readFile(key: string): Promise<Buffer> {
   if (config.storage === "local") return fsp.readFile(localPath(key));
-  const res = await get(key, { access: "private" });
+  const res = await get(key, { access: "private", useCache: false });
   if (!res || res.statusCode !== 200) throw new Error(`File not found in storage: ${key}`);
   return Buffer.from(await new Response(res.stream).arrayBuffer());
 }
@@ -95,6 +98,88 @@ export async function deleteFiles(keys: string[]): Promise<void> {
   await del(keys);
 }
 
+// --- JSON records with optimistic concurrency ------------------------------------
+
+export interface Versioned<T> {
+  value: T;
+  etag: string;
+}
+
+const sha = (s: string) => crypto.createHash("sha1").update(s).digest("hex");
+
+// Local mode runs in one process, so a per-key lock makes compare-and-swap safe.
+const locks = new Map<string, Promise<unknown>>();
+async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  locks.set(key, next.catch(() => undefined));
+  return next;
+}
+
+/**
+ * Reads a JSON record. `fresh` bypasses the CDN cache: use it before any
+ * read-modify-write. Cached reads are free on Vercel Blob's quota but may be up
+ * to a minute stale.
+ */
+export async function readJson<T>(key: string, { fresh = false } = {}): Promise<Versioned<T> | null> {
+  if (config.storage === "local") {
+    const text = await fsp.readFile(localPath(key), "utf8").catch(() => null);
+    return text === null ? null : { value: JSON.parse(text) as T, etag: sha(text) };
+  }
+  const res = await get(key, { access: "private", useCache: !fresh });
+  if (!res || res.statusCode !== 200) return null;
+  return { value: JSON.parse(await new Response(res.stream).text()) as T, etag: res.blob.etag };
+}
+
+/**
+ * Writes a JSON record. With `ifMatch` the write only succeeds if the record is
+ * unchanged since that read; with `create` only if it doesn't exist yet.
+ * Returns the new etag, or null when the condition failed.
+ */
+export async function writeJson(key: string, value: unknown, cond: { ifMatch?: string; create?: boolean } = {}): Promise<string | null> {
+  const text = JSON.stringify(value);
+  if (config.storage === "local") {
+    return withLock(key, async () => {
+      const file = localPath(key);
+      const current = await fsp.readFile(file, "utf8").catch(() => null);
+      if (cond.create && current !== null) return null;
+      if (cond.ifMatch && (current === null || sha(current) !== cond.ifMatch)) return null;
+      await fsp.mkdir(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${crypto.randomUUID()}.tmp`;
+      await fsp.writeFile(tmp, text);
+      await fsp.rename(tmp, file);
+      return sha(text);
+    });
+  }
+  try {
+    const result = await put(key, text, {
+      access: "private",
+      contentType: "application/json",
+      addRandomSuffix: false,
+      allowOverwrite: !cond.create,
+      ifMatch: cond.ifMatch,
+      cacheControlMaxAge: 3600,
+    });
+    return result.etag;
+  } catch (err) {
+    if (err instanceof BlobPreconditionFailedError) return null;
+    if (cond.create && /already exists/i.test((err as Error).message)) return null;
+    throw err;
+  }
+}
+
+/** Read-modify-write that retries when someone else changed the record in between. */
+export async function updateJson<T>(key: string, initial: T, change: (current: T) => T): Promise<T> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const current = await readJson<T>(key, { fresh: true });
+    const next = change(current ? current.value : structuredClone(initial));
+    const ok = await writeJson(key, next, current ? { ifMatch: current.etag } : { create: true });
+    if (ok) return next;
+    await new Promise((r) => setTimeout(r, 50 + Math.random() * 200));
+  }
+  throw new Error(`Couldn't update ${key}: too many concurrent changes`);
+}
+
 // One read-only delegation for the whole store, reused for an hour. Signing a URL for
 // a single file is then a local HMAC, and access control happens in our own routes.
 let delegation: IssuedSignedToken | null = null;
@@ -105,9 +190,4 @@ async function signedUrl(key: string): Promise<string> {
   }
   const { presignedUrl } = await presignUrl(delegation, { operation: "get", pathname: key, access: "private" });
   return presignedUrl;
-}
-
-/** Local: the file path to stream. Blob: a short-lived signed URL to redirect to. */
-export async function locate(key: string): Promise<{ file: string } | { url: string }> {
-  return config.storage === "local" ? { file: localPath(key) } : { url: await signedUrl(key) };
 }
