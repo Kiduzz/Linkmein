@@ -4,18 +4,28 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Keep the page behind from scrolling while the modal is open.
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = overflow;
+    };
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4" onMouseDown={onClose}>
-      <div className={`card my-8 w-full ${wide ? "max-w-5xl" : "max-w-2xl"}`} onMouseDown={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 md:p-4" onMouseDown={onClose}>
+      {/* Full screen on phones, a centered card on larger screens. */}
+      <div
+        className={`min-h-full w-full bg-white md:my-8 md:min-h-0 md:rounded-xl md:border md:border-slate-200 md:shadow-sm ${wide ? "md:max-w-5xl" : "md:max-w-2xl"}`}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-5 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] md:rounded-t-xl">
           <h2 className="font-semibold">{title}</h2>
           <button className="btn-ghost px-2 py-1" onClick={onClose} aria-label="Close">
             ✕
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="p-4 md:p-5">{children}</div>
       </div>
     </div>
   );

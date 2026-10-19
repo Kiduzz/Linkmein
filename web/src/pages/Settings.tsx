@@ -115,11 +115,23 @@ export function SettingsPage() {
         ) : (
           <p className="text-sm text-slate-700">Not connected. Connect to publish posts.</p>
         )}
-        {config.linkedinConfigured && (
-          <a href="/auth/linkedin" className="btn-secondary">
-            {li.connected ? "Reconnect LinkedIn" : "Connect LinkedIn"}
-          </a>
-        )}
+        <div className="flex flex-wrap gap-2">
+          {config.linkedinConfigured && (
+            <a href="/auth/linkedin" className="btn-secondary">
+              {li.connected ? "Reconnect LinkedIn" : "Connect LinkedIn"}
+            </a>
+          )}
+          <button
+            className="btn-ghost"
+            onClick={async () => {
+              await api.logout();
+              window.location.href = "/login";
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+        <p className="text-xs text-slate-500">Signing out keeps your data on this device; it's there again when you sign back in.</p>
       </section>
 
       <DeviceData />

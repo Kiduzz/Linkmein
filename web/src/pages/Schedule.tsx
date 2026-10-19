@@ -111,6 +111,7 @@ export function SchedulePage() {
             initial={{ text: editing.text, mediaIds: editing.mediaIds, visibility: editing.visibility, scheduledAt: editing.scheduledAt }}
             library={media}
             postId={editing.id}
+            inModal
             onSaved={() => {
               setEditing(null);
               void load();
@@ -138,9 +139,9 @@ function Empty({ children }: { children: React.ReactNode }) {
 function PostCard({ post, onEdit, onPublish, onDelete }: { post: Post; onEdit: () => void; onPublish: () => void; onDelete: () => void }) {
   const editable = ["draft", "scheduled", "failed"].includes(post.status);
   return (
-    <div className="card flex gap-4 p-4">
+    <div className="card flex flex-wrap gap-3 p-4 sm:flex-nowrap sm:gap-4">
       {post.mediaIds.length > 0 && (
-        <img src={previewUrl(post.mediaIds[0])} alt="" className="h-20 w-20 shrink-0 rounded-lg border object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
+        <img src={previewUrl(post.mediaIds[0])} alt="" className="h-16 w-16 shrink-0 rounded-lg border object-cover sm:h-20 sm:w-20" onError={(e) => (e.currentTarget.style.display = "none")} />
       )}
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -154,7 +155,7 @@ function PostCard({ post, onEdit, onPublish, onDelete }: { post: Post; onEdit: (
         <p className="line-clamp-3 whitespace-pre-wrap text-sm">{post.text}</p>
         {post.lastError && <p className="mt-2 text-xs text-red-600">{post.lastError}</p>}
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-1">
+      <div className="flex w-full flex-wrap justify-end gap-1 border-t border-slate-100 pt-2 sm:w-auto sm:shrink-0 sm:flex-col sm:items-end sm:border-0 sm:pt-0">
         {post.url && (
           <a className="btn-secondary px-3 py-1 text-xs" href={post.url} target="_blank" rel="noreferrer">
             View on LinkedIn

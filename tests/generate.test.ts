@@ -12,7 +12,7 @@ vi.mock("../web/src/ai/claude", async (orig) => ({
   }),
 }));
 
-const { generatePosts, remixPosts } = await import("../web/src/ai/generate");
+const { checkHook, generatePosts, remixPosts, replaceOpening } = await import("../web/src/ai/generate");
 
 const user: AiContext = { name: "Ada", apiKey: "sk-test", model: "claude-opus-5-5" };
 const preview = new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: "image/jpeg" });
@@ -72,5 +72,20 @@ describe("remixPosts", () => {
     expect(calls[1].content.at(-1).text).toMatch(/reused too much wording/);
     expect(drafts.map((d) => d.angle)).toEqual(["rewrite", "fresh"]);
     expect(drafts.every((d) => d.overlap < 0.12)).toBe(true);
+  });
+});
+
+describe("hook check", () => {
+  it("asks Claude about the opening only and keeps three alternatives", async () => {
+    reply = { score: 14, verdict: "Too generic.", alternatives: ["A", "B", "C", "D"] };
+    const review = await checkHook(user, { audience: "Founders" }, "We had a meeting.\n\nIt went well.");
+    expect(review).toEqual({ score: 10, verdict: "Too generic.", alternatives: ["A", "B", "C"] });
+    expect(calls[0].content.at(-1).text).toMatch(/see more/);
+    expect(calls[0].system).toContain("Target audience: Founders");
+  });
+
+  it("replaces just the first paragraph", () => {
+    expect(replaceOpening("Old hook\nstill hook\n\nBody\n\n#tag", "New hook")).toBe("New hook\n\nBody\n\n#tag");
+    expect(replaceOpening("One paragraph only", "New hook")).toBe("New hook");
   });
 });

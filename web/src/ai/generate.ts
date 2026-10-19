@@ -2,7 +2,7 @@ import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { StoredMedia } from "../local/db";
 import type { Inspiration } from "../api";
-import type { GenerateOptions, InspirationAnalysis, PostDraft, Profile, RemixDraft, RemixOptions } from "../../../shared/types";
+import { LINKEDIN_FOLD, type GenerateOptions, type InspirationAnalysis, type PostDraft, type Profile, type RemixDraft, type RemixOptions } from "../../../shared/types";
 import { AiError, structured, type AiContext } from "./claude";
 import { ghostwriterSystem, lengthGuide, WRITING_RULES } from "../../../shared/ai/prompts";
 import { OVERLAP_LIMIT, overlapScore } from "../../../shared/ai/originality";
@@ -245,4 +245,36 @@ export async function analyzeVoice(ctx: AiContext, samples: string[]): Promise<s
     effort: "low",
   });
   return out.voiceGuide;
+}
+
+const HookSchema = z.object({
+  score: z.number().int().describe("1-10: how strongly the opening makes the target reader click \"see more\""),
+  verdict: z.string().describe("One or two sentences: what works or doesn't in the current opening"),
+  alternatives: z.array(z.string()).describe("Exactly 3 rewritten openings (1-2 lines each) using only facts from the post"),
+});
+
+export type HookReview = z.infer<typeof HookSchema>;
+
+/** Rates the part of the post shown before "…see more" and suggests stronger openings. */
+export async function checkHook(ctx: AiContext, profile: Profile, text: string): Promise<HookReview> {
+  if (!text.trim()) throw new AiError("Write something first.", 400);
+  const out = await structured(ctx, {
+    system: ghostwriterSystem(ctx.name, profile),
+    content: [
+      { type: "text", text: `<draft>\n${text}\n</draft>` },
+      {
+        type: "text",
+        text: `LinkedIn shows roughly the first ${LINKEDIN_FOLD} characters (or first 3 lines) before "…see more". Judge only that opening, for this author's target audience: is it specific, does it create curiosity or promise value, would the right reader tap "see more"? Score it 1-10, explain briefly, and write exactly 3 stronger openings that fit the rest of the post. Each opening replaces the post's first paragraph, stays in the author's voice, and uses only facts already in the draft.`,
+      },
+    ],
+    schema: HookSchema,
+    effort: "low",
+  });
+  return { ...out, score: Math.min(10, Math.max(1, out.score)), alternatives: out.alternatives.slice(0, 3) };
+}
+
+/** Replaces the post's first paragraph with a new opening. */
+export function replaceOpening(text: string, opening: string): string {
+  const breakAt = text.search(/\n\s*\n/);
+  return breakAt === -1 ? opening.trim() : `${opening.trim()}${text.slice(breakAt)}`;
 }

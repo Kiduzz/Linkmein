@@ -4,7 +4,7 @@ import { splitSamples } from "../../shared/ai/prompts";
 import { addRecord, db, openAccount, type LocalSettings, type StoredMedia, type StoredPost } from "./local/db";
 import { extension, uploadToServer } from "./local/upload";
 import { verifyApiKey, type AiContext } from "./ai/claude";
-import { analyzeInspiration, analyzeVoice, generatePosts, refinePost, remixPosts } from "./ai/generate";
+import { analyzeInspiration, analyzeVoice, checkHook, generatePosts, refinePost, remixPosts, type HookReview } from "./ai/generate";
 
 // The app's data layer. Profile, Claude key, media, saved posts and drafts live on
 // this device (see local/db.ts). The server is only used to sign in with LinkedIn
@@ -325,6 +325,9 @@ export const api = {
   },
   async refine(text: string, instruction: string): Promise<{ text: string }> {
     return { text: await refinePost(await aiContext(), await getProfile(), text, instruction) };
+  },
+  async checkHook(text: string): Promise<HookReview> {
+    return checkHook(await aiContext(), await getProfile(), text);
   },
 
   async inspirations(): Promise<Inspiration[]> {
