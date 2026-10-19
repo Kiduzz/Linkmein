@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, previewUrl, type Inspiration, type Media, type Post } from "../api";
+import { api, previewUrl, type Inspiration, type Post } from "../api";
+import { uploadMedia } from "../media/process";
 import { useAction, useMediaLibrary } from "../hooks";
 import { useApp } from "../context";
 import { MediaTray } from "../components/MediaTray";
@@ -8,15 +9,6 @@ import { PostEditor, type EditorValue } from "../components/PostEditor";
 import { SavedNotice } from "../components/SavedNotice";
 import { ErrorText, PageHeader, Spinner } from "../components/ui";
 import type { PostLength, RemixDraft } from "../../../shared/types";
-
-async function waitUntilReady(m: Media): Promise<Media> {
-  for (let i = 0; i < 60 && m.status === "processing"; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    m = await api.mediaOne(m.id);
-  }
-  if (m.status !== "ready") throw new Error(m.error ?? "The screenshot couldn't be processed.");
-  return m;
-}
 
 export function RemixPage() {
   const [items, setItems] = useState<Inspiration[]>([]);
@@ -96,7 +88,7 @@ export function RemixPage() {
 }
 
 function AddInspiration({ onAdded, onCancel }: { onAdded: (i: Inspiration) => void; onCancel?: () => void }) {
-  const { me } = useApp();
+  const { me, config } = useApp();
   const [text, setText] = useState("");
   const [author, setAuthor] = useState("");
   const [url, setUrl] = useState("");
@@ -107,10 +99,7 @@ function AddInspiration({ onAdded, onCancel }: { onAdded: (i: Inspiration) => vo
   const submit = () =>
     action.run(async () => {
       let screenshotMediaId: number | undefined;
-      if (screenshot) {
-        const [m] = await api.upload([screenshot]);
-        screenshotMediaId = (await waitUntilReady(m)).id;
-      }
+      if (screenshot) screenshotMediaId = (await uploadMedia(screenshot, me.user.id, config)).id;
       onAdded(await api.addInspiration({ text, author: author || undefined, url: url || undefined, screenshotMediaId }));
     });
 

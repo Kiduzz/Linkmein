@@ -1,9 +1,10 @@
+// Self-hosted entry point: one long-running process that serves the app and runs the scheduler.
 import { config, linkedinConfigured } from "./config.js";
-import { db } from "./db.js";
+import { dbReady } from "./db.js";
 import { createApp } from "./app.js";
 import { startScheduler } from "./scheduler.js";
 
-db(); // run migrations before accepting requests
+await dbReady(); // run migrations before accepting requests
 const app = createApp();
 const stopScheduler = startScheduler();
 

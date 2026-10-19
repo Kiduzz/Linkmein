@@ -1,5 +1,8 @@
 import { useRef, useState } from "react";
-import { api, type Media } from "../api";
+import type { Media } from "../api";
+import { useApp } from "../context";
+import { uploadMany } from "../media/process";
+import { describeJob, resumeTranscription, useTranscriptionJobs } from "../media/transcriber";
 import { MediaThumb } from "./MediaThumb";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { ErrorText, Modal, Spinner } from "./ui";
@@ -14,6 +17,8 @@ interface Props {
 
 /** Pick the material Claude should write from: upload, record, or choose from the library. */
 export function MediaTray({ library, refresh, selected, onChange, label = "Material" }: Props) {
+  const { me, config } = useApp();
+  const jobs = useTranscriptionJobs();
   const input = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,13 +38,16 @@ export function MediaTray({ library, refresh, selected, onChange, label = "Mater
     setUploading(true);
     setError(null);
     try {
-      await added(await api.upload(files));
-    } catch (err) {
-      setError((err as Error).message);
+      const result = await uploadMany(files, me.user.id, config);
+      setError(result.error);
+      if (result.media.length) await added(result.media);
     } finally {
       setUploading(false);
     }
   };
+
+  const resume = (m: Media) => resumeTranscription(m).catch((err) => setError((err as Error).message));
+  const transcribing = chosen.filter((m) => m.status === "processing");
 
   const toggle = (id: number) => onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
 
@@ -99,8 +107,28 @@ export function MediaTray({ library, refresh, selected, onChange, label = "Mater
             e.target.value = "";
           }}
         />
-        {chosen.some((m) => m.status === "processing") && (
-          <p className="mt-3 text-xs text-slate-500">Processing… videos and voice notes are transcribed on your server, which can take a minute.</p>
+        {transcribing.length > 0 && (
+          <ul className="mt-3 space-y-1 text-xs text-slate-500">
+            {transcribing.map((m) => {
+              const job = jobs.get(m.id);
+              return (
+                <li key={m.id}>
+                  <span className="font-medium text-slate-700">{m.name}:</span>{" "}
+                  {job ? (
+                    describeJob(job)
+                  ) : (
+                    <>
+                      transcription was interrupted.{" "}
+                      <button type="button" className="text-brand-700 underline" onClick={() => resume(m)}>
+                        Resume
+                      </button>
+                    </>
+                  )}
+                </li>
+              );
+            })}
+            <li>Speech is transcribed on this device, so keep this tab open until it finishes.</li>
+          </ul>
         )}
         <div className="mt-2">
           <ErrorText error={error} />

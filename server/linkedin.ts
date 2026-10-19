@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { config } from "./config.js";
 
 // Thin client for the LinkedIn APIs Linkmein uses:
@@ -187,8 +186,10 @@ interface VideoUploadInstruction {
   lastByte: number;
 }
 
-export async function uploadVideo(accessToken: string, owner: string, filePath: string): Promise<string> {
-  const { size } = await fs.stat(filePath);
+/** Reads bytes [start, end] inclusive from wherever the video is stored. */
+export type ReadRange = (start: number, end: number) => Promise<Buffer>;
+
+export async function uploadVideo(accessToken: string, owner: string, size: number, readRange: ReadRange): Promise<string> {
   const init = await request(`${API_BASE}/rest/videos?action=initializeUpload`, {
     method: "POST",
     headers: restHeaders(accessToken, { "Content-Type": "application/json" }),
@@ -201,23 +202,16 @@ export async function uploadVideo(accessToken: string, owner: string, filePath: 
   };
 
   const etags: string[] = [];
-  const handle = await fs.open(filePath, "r");
-  try {
-    for (const part of value.uploadInstructions) {
-      const length = part.lastByte - part.firstByte + 1;
-      const chunk = Buffer.alloc(length);
-      await handle.read(chunk, 0, length, part.firstByte);
-      const res = await request(part.uploadUrl, {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: new Uint8Array(chunk),
-      });
-      const etag = res.headers.get("etag");
-      if (!etag) throw new LinkedInError("LinkedIn video upload returned no ETag", 502);
-      etags.push(etag);
-    }
-  } finally {
-    await handle.close();
+  for (const part of value.uploadInstructions) {
+    const chunk = await readRange(part.firstByte, part.lastByte);
+    const res = await request(part.uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(chunk),
+    });
+    const etag = res.headers.get("etag");
+    if (!etag) throw new LinkedInError("LinkedIn video upload returned no ETag", 502);
+    etags.push(etag);
   }
 
   await request(`${API_BASE}/rest/videos?action=finalizeUpload`, {

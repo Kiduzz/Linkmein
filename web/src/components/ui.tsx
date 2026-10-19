@@ -49,6 +49,7 @@ const STATUS_STYLES: Record<string, string> = {
   published: "bg-emerald-100 text-emerald-800",
   failed: "bg-red-100 text-red-700",
   processing: "bg-amber-100 text-amber-800",
+  transcribing: "bg-amber-100 text-amber-800",
   ready: "bg-emerald-100 text-emerald-800",
 };
 

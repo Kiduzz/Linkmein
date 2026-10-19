@@ -3,39 +3,20 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cookieParser from "cookie-parser";
-import multer from "multer";
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { z, ZodError } from "zod";
 import { config, linkedinConfigured } from "./config.js";
 import { authRouter, loadSession, requireCsrfHeader, requireUser } from "./auth.js";
-import { db, now, type InspirationRow, type UserRow } from "./db.js";
+import { all, dbReady, get, now, run, type InspirationRow, type UserRow } from "./db.js";
 import { maskSecret } from "./crypto.js";
 import { getAnthropicKey, getProfile, saveProfile, setAnthropicKey, updateUserSettings } from "./users.js";
 import { AiError, verifyApiKey } from "./ai/claude.js";
 import { analyzeInspiration, analyzeVoice, generatePosts, refinePost, remixPosts } from "./ai/generate.js";
 import { splitSamples } from "./ai/prompts.js";
-import {
-  ACCEPTED_MIME,
-  deleteMedia,
-  getMedia,
-  getMediaMany,
-  insertMedia,
-  kindFromMime,
-  listMedia,
-  processMedia,
-  publicMedia,
-  updateMediaDetails,
-} from "./media/library.js";
-import {
-  claimPost,
-  createPostRow,
-  deletePostRow,
-  getPost,
-  HttpError,
-  listPosts,
-  publicPost,
-  publishClaimed,
-  updatePostRow,
-} from "./posts.js";
+import { deleteMedia, getMedia, getMediaMany, listMedia, MediaError, publicMedia, registerMedia, updateMediaDetails } from "./media/library.js";
+import { locate, ownsKey, TooLargeError, writeLocal } from "./storage.js";
+import { claimPost, createPostRow, deletePostRow, getPost, HttpError, listPosts, publicPost, publishClaimed, updatePostRow } from "./posts.js";
+import { recoverInterrupted, runDuePosts } from "./scheduler.js";
 import { MODELS, type Profile } from "../shared/types.js";
 
 const user = (req: Request) => req.user as UserRow;
@@ -44,6 +25,20 @@ const idParam = (req: Request) => {
   if (!Number.isInteger(id)) throw new HttpError(400, "Invalid id");
   return id;
 };
+
+/**
+ * Keeps work going after the response is sent. On Vercel the function would
+ * otherwise freeze as soon as we reply; waitUntil keeps it alive until done.
+ */
+async function background(work: Promise<unknown>): Promise<void> {
+  const task = work.catch((err) => console.error("Background task failed", err));
+  if (config.onVercel) {
+    const { waitUntil } = await import("@vercel/functions");
+    waitUntil(task);
+  } else {
+    void task;
+  }
+}
 
 // --- Request schemas ------------------------------------------------------------
 
@@ -108,14 +103,69 @@ const PostBody = z.object({
   inspirationId: z.number().int().optional(),
 });
 
-const MediaPatch = z.object({ transcript: z.string().max(50_000).optional(), altText: z.string().max(1_000).optional() });
+const key = z.string().max(200);
+const MediaBody = z.object({
+  kind: z.enum(["image", "audio", "video"]),
+  name: z.string().min(1).max(200),
+  mime: z.string().max(100),
+  fileKey: key,
+  previewKey: key.optional(),
+  frameKeys: z.array(key).max(8).optional(),
+  durationS: z.number().nonnegative().optional(),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  transcript: z.string().max(50_000).optional(),
+  status: z.enum(["processing", "ready"]),
+  error: z.string().max(500).optional(),
+});
+
+const MediaPatch = z.object({
+  transcript: z.string().max(50_000).optional(),
+  altText: z.string().max(1_000).optional(),
+  status: z.enum(["ready", "failed"]).optional(),
+  error: z.string().max(500).nullable().optional(),
+});
 
 // --- App ------------------------------------------------------------------------------
 
 export function createApp() {
   const app = express();
   app.disable("x-powered-by");
-  app.set("trust proxy", "loopback");
+  app.set("trust proxy", true);
+  app.use(async (_req, _res, next) => {
+    await dbReady();
+    next();
+  });
+
+  // The publish run called by Vercel Cron or an external cron service. Defined
+  // before the cookie/CSRF middleware: it authenticates with CRON_SECRET instead.
+  app.all("/api/cron/publish", async (req, res) => {
+    const supplied = req.get("authorization")?.replace(/^Bearer\s+/i, "") ?? String(req.query.secret ?? "");
+    if (!config.cronSecret) {
+      res.status(503).json({ error: "Set CRON_SECRET to enable the publish endpoint." });
+      return;
+    }
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(config.cronSecret);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      res.status(401).json({ error: "Bad cron secret" });
+      return;
+    }
+    const recovered = await recoverInterrupted();
+    // Leave a minute of the 5-minute function limit for the post in progress to finish.
+    const published = await runDuePosts(now(), 4 * 60_000);
+    res.json({ ok: true, attempted: published, recovered });
+  });
+
+  // Local storage: the browser PUTs file bytes here. Mounted before express.json so the body stays a stream.
+  app.put("/api/uploads/{*key}", cookieParser(), loadSession, requireCsrfHeader, requireUser, async (req, res) => {
+    if (config.storage !== "local") throw new HttpError(404, "Uploads go to Vercel Blob on this server.");
+    const k = (req.params as { key: string[] }).key.join("/");
+    if (!ownsKey(user(req).id, k)) throw new HttpError(403, "Invalid upload key.");
+    const size = await writeLocal(k, req, config.maxUploadMb * 1024 * 1024);
+    res.status(201).json({ key: k, size });
+  });
+
   app.use(express.json({ limit: "1mb" }));
   app.use(cookieParser());
   app.use(loadSession);
@@ -125,17 +175,23 @@ export function createApp() {
   api.use(requireCsrfHeader);
 
   api.get("/config", (_req, res) => {
-    res.json({ linkedinConfigured: linkedinConfigured(), devLogin: config.allowDevLogin, models: MODELS });
+    res.json({
+      linkedinConfigured: linkedinConfigured(),
+      devLogin: config.allowDevLogin,
+      models: MODELS,
+      storage: config.storage,
+      maxUploadMb: config.maxUploadMb,
+    });
   });
 
   api.use(requireUser);
 
   api.get("/me", (req, res) => {
     const u = user(req);
-    const key = getAnthropicKey(u);
+    const apiKey = getAnthropicKey(u);
     res.json({
       user: { id: u.id, name: u.name, email: u.email, picture: u.picture },
-      settings: { hasApiKey: Boolean(key), apiKeyMasked: key ? maskSecret(key) : null, model: u.model ?? config.ai.defaultModel, timezone: u.timezone },
+      settings: { hasApiKey: Boolean(apiKey), apiKeyMasked: apiKey ? maskSecret(apiKey) : null, model: u.model ?? config.ai.defaultModel, timezone: u.timezone },
       linkedin: {
         connected: Boolean(u.linkedin_token_enc),
         expiresAt: u.linkedin_token_expires_at,
@@ -148,81 +204,76 @@ export function createApp() {
     const body = SettingsBody.parse(req.body);
     if (body.apiKey) {
       await verifyApiKey(body.apiKey);
-      setAnthropicKey(user(req).id, body.apiKey);
+      await setAnthropicKey(user(req).id, body.apiKey);
     }
-    updateUserSettings(user(req).id, { model: body.model, timezone: body.timezone });
+    await updateUserSettings(user(req).id, { model: body.model, timezone: body.timezone });
     res.json({ ok: true });
   });
 
-  api.delete("/settings/api-key", (req, res) => {
-    setAnthropicKey(user(req).id, null);
+  api.delete("/settings/api-key", async (req, res) => {
+    await setAnthropicKey(user(req).id, null);
     res.json({ ok: true });
   });
 
   // Profile
-  api.get("/profile", (req, res) => {
-    res.json(getProfile(user(req).id));
+  api.get("/profile", async (req, res) => {
+    res.json(await getProfile(user(req).id));
   });
 
-  api.put("/profile", (req, res) => {
+  api.put("/profile", async (req, res) => {
     const profile = ProfileBody.parse(req.body) as Profile;
-    saveProfile(user(req).id, profile);
+    await saveProfile(user(req).id, profile);
     res.json(profile);
   });
 
   api.post("/profile/analyze-voice", async (req, res) => {
-    const profile = getProfile(user(req).id);
+    const profile = await getProfile(user(req).id);
     const voiceGuide = await analyzeVoice(user(req), splitSamples(profile.writingSamples));
-    saveProfile(user(req).id, { ...profile, voiceGuide });
+    await saveProfile(user(req).id, { ...profile, voiceGuide });
     res.json({ voiceGuide });
   });
 
-  // Media
-  const upload = multer({
-    storage: multer.diskStorage({
-      destination: (req, _file, cb) => {
-        const dir = path.join(config.uploadDir, String(user(req).id));
-        fs.mkdirSync(dir, { recursive: true });
-        cb(null, dir);
+  // Media. Files go straight from the browser to storage; then the browser registers them here.
+  api.post("/blob/upload", async (req, res) => {
+    if (config.storage !== "blob") throw new HttpError(404, "Vercel Blob isn't configured on this server.");
+    const userId = user(req).id;
+    const result = await handleUpload({
+      request: req,
+      body: req.body as HandleUploadBody,
+      onBeforeGenerateToken: async (pathname) => {
+        if (!ownsKey(userId, pathname)) throw new HttpError(403, "Invalid upload key.");
+        return {
+          addRandomSuffix: false,
+          allowOverwrite: false,
+          maximumSizeInBytes: config.maxUploadMb * 1024 * 1024,
+          allowedContentTypes: ["image/jpeg", "image/png", "image/gif", "audio/*", "video/*"],
+        };
       },
-      filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, "").slice(0, 8);
-        cb(null, `${crypto.randomUUID()}${ext}`);
-      },
-    }),
-    limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 20 },
-    fileFilter: (_req, file, cb) => {
-      if (ACCEPTED_MIME.test(file.mimetype.split(";")[0])) cb(null, true);
-      else cb(new HttpError(400, `Unsupported file type: ${file.mimetype}`));
-    },
-  });
-
-  api.get("/media", (req, res) => {
-    res.json(listMedia(user(req).id).map(publicMedia));
-  });
-
-  api.post("/media", upload.array("files", 20), (req, res) => {
-    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
-    if (!files.length) throw new HttpError(400, "No files uploaded");
-    const rows = files.map((f) => {
-      const mime = f.mimetype.split(";")[0];
-      return insertMedia(user(req).id, { ...f, mimetype: mime }, kindFromMime(mime)!);
     });
-    for (const row of rows) void processMedia(row);
-    res.status(201).json(rows.map(publicMedia));
+    res.json(result);
   });
 
-  api.get("/media/:id", (req, res) => {
-    const m = getMedia(user(req).id, idParam(req));
+  api.get("/media", async (req, res) => {
+    res.json((await listMedia(user(req).id)).map(publicMedia));
+  });
+
+  api.post("/media", async (req, res) => {
+    const body = MediaBody.parse(req.body);
+    const m = await registerMedia(user(req).id, body);
+    res.status(201).json(publicMedia(m));
+  });
+
+  api.get("/media/:id", async (req, res) => {
+    const m = await getMedia(user(req).id, idParam(req));
     if (!m) throw new HttpError(404, "Media not found");
     res.json(publicMedia(m));
   });
 
-  api.patch("/media/:id", (req, res) => {
+  api.patch("/media/:id", async (req, res) => {
     const body = MediaPatch.parse(req.body);
     const id = idParam(req);
-    updateMediaDetails(user(req).id, id, { transcript: body.transcript, alt_text: body.altText });
-    res.json(publicMedia(getMedia(user(req).id, id)!));
+    await updateMediaDetails(user(req).id, id, { transcript: body.transcript, alt_text: body.altText, status: body.status, error: body.error });
+    res.json(publicMedia((await getMedia(user(req).id, id))!));
   });
 
   api.delete("/media/:id", async (req, res) => {
@@ -230,34 +281,44 @@ export function createApp() {
     res.json({ ok: true });
   });
 
-  api.get("/media/:id/file", (req, res) => {
-    const m = getMedia(user(req).id, idParam(req));
+  const sendStored = async (res: Response, storageKey: string, mime: string) => {
+    const where = await locate(storageKey);
+    if ("file" in where) {
+      res.type(mime).sendFile(where.file);
+    } else {
+      // Signed URLs last an hour; let the browser reuse the redirect for a while.
+      res.set("Cache-Control", "private, max-age=1800").redirect(302, where.url);
+    }
+  };
+
+  api.get("/media/:id/file", async (req, res) => {
+    const m = await getMedia(user(req).id, idParam(req));
     if (!m) throw new HttpError(404, "Media not found");
-    res.type(m.mime).sendFile(m.path);
+    await sendStored(res, m.file_key, m.mime);
   });
 
-  api.get("/media/:id/preview", (req, res) => {
-    const m = getMedia(user(req).id, idParam(req));
-    if (!m?.preview_path) throw new HttpError(404, "No preview");
-    res.type("image/jpeg").sendFile(m.preview_path);
+  api.get("/media/:id/preview", async (req, res) => {
+    const m = await getMedia(user(req).id, idParam(req));
+    if (!m?.preview_key) throw new HttpError(404, "No preview");
+    await sendStored(res, m.preview_key, "image/jpeg");
   });
 
   // AI
   api.post("/ai/generate", async (req, res) => {
     const body = GenerateBody.parse(req.body);
     const u = user(req);
-    const media = getMediaMany(u.id, body.mediaIds);
-    const { drafts, altTexts } = await generatePosts(u, getProfile(u.id), media, body);
+    const media = await getMediaMany(u.id, body.mediaIds);
+    const { drafts, altTexts } = await generatePosts(u, await getProfile(u.id), media, body);
     for (const { mediaId, altText } of altTexts) {
       const m = media.find((x) => x.id === mediaId);
-      if (m && !m.alt_text && m.kind !== "audio") updateMediaDetails(u.id, m.id, { alt_text: altText.slice(0, 1_000) });
+      if (m && !m.alt_text && m.kind !== "audio") await updateMediaDetails(u.id, m.id, { alt_text: altText.slice(0, 1_000) });
     }
     res.json({ drafts });
   });
 
   api.post("/ai/refine", async (req, res) => {
     const body = RefineBody.parse(req.body);
-    const text = await refinePost(user(req), getProfile(user(req).id), body.text, body.instruction);
+    const text = await refinePost(user(req), await getProfile(user(req).id), body.text, body.instruction);
     res.json({ text });
   });
 
@@ -271,48 +332,45 @@ export function createApp() {
     analysis: i.analysis ? JSON.parse(i.analysis) : null,
     createdAt: i.created_at,
   });
-  const getInspiration = (userId: number, id: number) =>
-    db().prepare("SELECT * FROM inspirations WHERE id = ? AND user_id = ?").get(id, userId) as InspirationRow | undefined;
+  const getInspiration = (userId: number, id: number) => get<InspirationRow>("SELECT * FROM inspirations WHERE id = ? AND user_id = ?", [id, userId]);
 
-  api.get("/inspirations", (req, res) => {
-    const rows = db().prepare("SELECT * FROM inspirations WHERE user_id = ? ORDER BY created_at DESC").all(user(req).id) as InspirationRow[];
+  api.get("/inspirations", async (req, res) => {
+    const rows = await all<InspirationRow>("SELECT * FROM inspirations WHERE user_id = ? ORDER BY created_at DESC", [user(req).id]);
     res.json(rows.map(publicInspiration));
   });
 
   api.post("/inspirations", async (req, res) => {
     const body = InspirationBody.parse(req.body);
     const u = user(req);
-    const screenshot = body.screenshotMediaId ? getMediaMany(u.id, [body.screenshotMediaId])[0] : undefined;
+    const screenshot = body.screenshotMediaId ? (await getMediaMany(u.id, [body.screenshotMediaId]))[0] : undefined;
     if (screenshot && screenshot.kind !== "image") throw new HttpError(400, "The screenshot must be an image.");
-    if (screenshot && screenshot.status !== "ready") throw new HttpError(409, "The screenshot is still processing.");
     const { text, analysis } = await analyzeInspiration(u, { text: body.text, screenshot });
-    const result = db()
-      .prepare(
-        `INSERT INTO inspirations (user_id, source_text, source_author, source_url, image_media_id, analysis, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(u.id, text, body.author || null, body.url || null, screenshot?.id ?? null, JSON.stringify(analysis), now());
-    res.status(201).json(publicInspiration(getInspiration(u.id, Number(result.lastInsertRowid))!));
+    const result = await run(
+      `INSERT INTO inspirations (user_id, source_text, source_author, source_url, image_media_id, analysis, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [u.id, text, body.author || null, body.url || null, screenshot?.id ?? null, JSON.stringify(analysis), now()],
+    );
+    res.status(201).json(publicInspiration((await getInspiration(u.id, result.lastId))!));
   });
 
-  api.delete("/inspirations/:id", (req, res) => {
-    db().prepare("DELETE FROM inspirations WHERE id = ? AND user_id = ?").run(idParam(req), user(req).id);
+  api.delete("/inspirations/:id", async (req, res) => {
+    await run("DELETE FROM inspirations WHERE id = ? AND user_id = ?", [idParam(req), user(req).id]);
     res.json({ ok: true });
   });
 
   api.post("/inspirations/:id/remix", async (req, res) => {
     const body = RemixBody.parse(req.body);
     const u = user(req);
-    const inspiration = getInspiration(u.id, idParam(req));
+    const inspiration = await getInspiration(u.id, idParam(req));
     if (!inspiration) throw new HttpError(404, "Inspiration not found");
-    const media = getMediaMany(u.id, body.mediaIds);
-    const drafts = await remixPosts(u, getProfile(u.id), inspiration, media, { ...body, inspirationId: inspiration.id });
+    const media = await getMediaMany(u.id, body.mediaIds);
+    const drafts = await remixPosts(u, await getProfile(u.id), inspiration, media, { ...body, inspirationId: inspiration.id });
     res.json({ drafts });
   });
 
   // Posts and the schedule
-  api.get("/posts", (req, res) => {
-    res.json(listPosts(user(req).id).map(publicPost));
+  api.get("/posts", async (req, res) => {
+    res.json((await listPosts(user(req).id)).map(publicPost));
   });
 
   const resolveStatus = (body: z.infer<typeof PostBody>) => {
@@ -325,46 +383,47 @@ export function createApp() {
   };
 
   const publishNow = async (id: number) => {
-    db().prepare("UPDATE posts SET attempts = 0 WHERE id = ?").run(id);
-    if (!claimPost(id, ["draft", "scheduled", "failed"])) throw new HttpError(409, "This post is already being published.");
-    // Videos can take minutes to process on LinkedIn, so finish in the background.
-    void publishClaimed(id);
+    await run("UPDATE posts SET attempts = 0 WHERE id = ? AND status IN ('draft', 'scheduled', 'failed')", [id]);
+    if (!(await claimPost(id, ["draft", "scheduled", "failed"]))) throw new HttpError(409, "This post is already being published.");
+    // Videos can take minutes to process on LinkedIn, so finish after replying.
+    await background(publishClaimed(id));
   };
 
   api.post("/posts", async (req, res) => {
     const body = PostBody.parse(req.body);
     const { status, scheduledAt } = resolveStatus(body);
-    const post = createPostRow(user(req).id, body, status, scheduledAt);
+    const post = await createPostRow(user(req).id, body, status, scheduledAt);
     if (body.action === "publish") await publishNow(post.id);
-    res.status(201).json(publicPost(getPost(user(req).id, post.id)!));
+    res.status(201).json(publicPost((await getPost(user(req).id, post.id))!));
   });
 
   api.put("/posts/:id", async (req, res) => {
     const body = PostBody.parse(req.body);
     const { status, scheduledAt } = resolveStatus(body);
     const id = idParam(req);
-    updatePostRow(user(req).id, id, body, status, scheduledAt);
+    await updatePostRow(user(req).id, id, body, status, scheduledAt);
     if (body.action === "publish") await publishNow(id);
-    res.json(publicPost(getPost(user(req).id, id)!));
+    res.json(publicPost((await getPost(user(req).id, id))!));
   });
 
   api.post("/posts/:id/publish", async (req, res) => {
     const id = idParam(req);
-    if (!getPost(user(req).id, id)) throw new HttpError(404, "Post not found");
+    if (!(await getPost(user(req).id, id))) throw new HttpError(404, "Post not found");
     await publishNow(id);
-    res.json(publicPost(getPost(user(req).id, id)!));
+    res.json(publicPost((await getPost(user(req).id, id))!));
   });
 
-  api.delete("/posts/:id", (req, res) => {
-    deletePostRow(user(req).id, idParam(req));
+  api.delete("/posts/:id", async (req, res) => {
+    await deletePostRow(user(req).id, idParam(req));
     res.json({ ok: true });
   });
 
   app.use("/api", api);
 
-  // The compiled server (dist/server) serves the built web app from dist/web. In dev, Vite serves it.
+  // The compiled self-hosted server (dist/server) serves the built web app from dist/web.
+  // In dev Vite serves it, and on Vercel the CDN does.
   const webDir = path.resolve(import.meta.dirname, "../web");
-  if (import.meta.filename.endsWith(".js") && fs.existsSync(path.join(webDir, "index.html"))) {
+  if (!config.onVercel && import.meta.filename.endsWith(".js") && fs.existsSync(path.join(webDir, "index.html"))) {
     app.use(express.static(webDir, { index: false, maxAge: "1h" }));
     app.get(/^(?!\/(api|auth)\/).*/, (_req, res) => res.sendFile(path.join(webDir, "index.html")));
   }
@@ -372,12 +431,10 @@ export function createApp() {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof ZodError) {
       res.status(400).json({ error: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
-    } else if (err instanceof HttpError || err instanceof AiError) {
+    } else if (err instanceof HttpError || err instanceof AiError || err instanceof MediaError) {
       res.status(err.status).json({ error: err.message });
-    } else if (err instanceof multer.MulterError) {
-      res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? `Files are limited to ${config.maxUploadMb} MB.` : err.message });
-    } else if (err instanceof Error && err.message.startsWith("Media not found")) {
-      res.status(400).json({ error: err.message });
+    } else if (err instanceof TooLargeError) {
+      res.status(413).json({ error: err.message });
     } else {
       console.error(err);
       res.status(500).json({ error: "Something went wrong on the server." });

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Media } from "../api";
+import type { Media } from "../api";
+import { useApp } from "../context";
+import { uploadMedia } from "../media/process";
 
 function pickMime(): string {
   for (const type of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]) {
@@ -10,6 +12,7 @@ function pickMime(): string {
 
 /** Records a voice note in the browser and uploads it for transcription. */
 export function VoiceRecorder({ onUploaded }: { onUploaded: (m: Media[]) => void }) {
+  const { me, config } = useApp();
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +43,8 @@ export function VoiceRecorder({ onUploaded }: { onUploaded: (m: Media[]) => void
         const blob = new Blob(chunks, { type });
         setUploading(true);
         try {
-          onUploaded(await api.upload([blob], [`Voice note ${new Date().toLocaleString()}.${ext}`]));
+          const file = new File([blob], `Voice note ${new Date().toLocaleString()}.${ext}`, { type });
+          onUploaded([await uploadMedia(file, me.user.id, config)]);
         } catch (err) {
           setError((err as Error).message);
         } finally {

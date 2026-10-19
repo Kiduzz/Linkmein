@@ -1,31 +1,32 @@
 # Linkmein
 
-Linkmein is an open-source, self-hosted tool for writing and scheduling LinkedIn posts. You give it photos, voice notes or videos, and Claude writes the post in your voice. It uses your own Anthropic API key.
+Linkmein is an open-source tool for writing and scheduling LinkedIn posts. You give it photos, voice notes or videos, and Claude writes the post in your voice. It uses your own Anthropic API key. Deploy it free on Vercel, or host it yourself.
 
-- **Media in, posts out.** Upload photos and videos, record a voice note in the browser, add a few words, and get 1–4 drafts. Claude looks at the photos and frames sampled from each video. Speech in voice notes and videos is transcribed on your own server.
+- **Media in, posts out.** Upload photos and videos, record a voice note in the browser, add a few words, and get 1–4 drafts. Claude looks at the photos and frames sampled from each video. Speech in voice notes and videos is transcribed in your browser, on your own device.
 - **It knows you.** Fill in "About you" once: your role, audience, goals, stories, tone, and what you never want to say. Paste a few of your old posts and Claude matches their style. It can also turn them into a voice guide you can edit.
 - **Remix posts you admire.** Paste another person's post or upload a screenshot of it. Claude works out why it works (the hook, structure, pacing and formatting). Then it writes an original post about *your* work using the same techniques. Each draft shows how much wording it shares with the original, and drafts that copy too much are rewritten.
 - **Edit and refine.** A preview shows the post as it will appear in the feed, including the "…see more" cut-off. One-click rewrites include "shorter", "stronger hook" and "more personal", or you can type your own instruction. Changes can be undone.
 - **Schedule.** Post now, save a draft, or schedule a time. A built-in scheduler publishes text, up to 20 images, or a single video through LinkedIn's official API. It retries if LinkedIn is down and never posts the same thing twice.
-- **Private by design.** Each user brings their own Claude API key. Keys and LinkedIn tokens are encrypted at rest. Uploads stay on your server, and Claude only sees what you choose to write about.
+- **Private by design.** Each user brings their own Claude API key. Keys and LinkedIn tokens are encrypted at rest. Uploads are stored privately, and Claude only sees what you choose to write about.
 
 ## How it works
 
 ```
 Browser (React)
-   │  photos · video · voice notes · notes
+   ├── resizes photos and samples video frames (canvas)
+   ├── transcribes speech locally (Whisper via transformers.js)
+   └── uploads files straight to storage ──► local disk or private Vercel Blob
+   │
    ▼
-Linkmein server (Node, Express, SQLite)
-   ├── sharp: resizes photos for Claude's vision input
-   ├── ffmpeg: samples video frames and extracts audio
-   ├── Whisper (transformers.js): local speech-to-text
+Linkmein server (Node, Express, SQLite/libSQL)
    ├── Claude API, using your key: drafts, remixes, refinements, voice analysis
    └── Scheduler → LinkedIn Posts / Images / Videos API
+         (a built-in timer when self-hosted, a cron-called endpoint on Vercel)
 ```
 
 ## Quick start
 
-You need **Node 20.11+** and **ffmpeg**, or Docker.
+You need **Node 20.11+**, or Docker.
 
 ```bash
 git clone https://github.com/kiduzz/linkmein.git
@@ -61,11 +62,14 @@ cp .env.example .env        # set DOMAIN and BASE_URL=https://<DOMAIN>
 docker compose --profile https up -d --build
 ```
 
-Everything is stored in `DATA_DIR`: the SQLite database, uploads, the Whisper model, and the generated `app-secret.key`. Back that directory up.
+Self-hosted, everything is stored in `DATA_DIR`: the SQLite database, uploads, and the generated `app-secret.key`. Back that directory up.
 
 ### Free hosting
 
-Linkmein needs a server that stays on, so scheduled posts go out when you're offline. Serverless platforms like Vercel, Netlify or Cloudflare Workers won't run it. **[Oracle Cloud's Always Free tier](docs/deploy-oracle.md)** gives you a free always-on server that runs it well. The guide walks through every step.
+Two free options, each with a step-by-step guide:
+
+- **[Vercel](docs/deploy-vercel.md)** (recommended). Free Vercel Hobby plan, plus a free Turso database and a free cron-job.org account to publish on time. No server to look after. The catches: 1 GB of file storage, 200 MB per upload, and Hobby is for personal, non-commercial use.
+- **[Oracle Cloud Always Free](docs/deploy-oracle.md)**. A free always-on server running the Docker setup above. More room, more setup.
 
 ## Create a LinkedIn app
 
@@ -102,7 +106,7 @@ A typical generation (three drafts from a few photos and a voice note) is a sing
 
 ## Voice notes and video audio
 
-Speech is transcribed locally with [Whisper](https://github.com/openai/whisper) through [transformers.js](https://huggingface.co/docs/transformers.js), so recordings never go to a third party. The model (`WHISPER_MODEL`, default `onnx-community/whisper-base`, about 150 MB) downloads into `DATA_DIR/models` the first time it's used. You can correct any transcript in the **Library**. If the optional `@huggingface/transformers` package fails to install on your platform, everything else still works and you can type transcripts yourself.
+Speech is transcribed in your browser with [Whisper](https://github.com/openai/whisper) (`onnx-community/whisper-base`) through [transformers.js](https://huggingface.co/docs/transformers.js), so no transcription service sees your recordings and you don't need another API key. The model downloads into the browser the first time and is cached after that. Keep the tab open until a transcription finishes; if it's interrupted, resume it from the **Library**. You can also correct or type any transcript there.
 
 ## Configuration
 
@@ -110,15 +114,17 @@ See [`.env.example`](.env.example) for every option. The important ones:
 
 | Variable | Default | |
 | --- | --- | --- |
-| `BASE_URL` | `http://localhost:3000` | Public URL. Used for the OAuth redirect and secure cookies |
+| `BASE_URL` | `http://localhost:3000`, or your Vercel production URL | Public URL. Used for the OAuth redirect and secure cookies |
 | `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | | From your LinkedIn app |
-| `APP_SECRET` | generated | Encrypts keys and tokens at rest |
-| `DATA_DIR` | `./data` | Database, uploads and models |
+| `APP_SECRET` | generated (required on Vercel) | Encrypts keys and tokens at rest |
+| `DATA_DIR` | `./data` | Self-hosted database and uploads |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | local SQLite file | Hosted database (required on Vercel) |
+| `BLOB_READ_WRITE_TOKEN` | local disk | Use Vercel Blob for uploads (required on Vercel) |
+| `CRON_SECRET` | | Protects `/api/cron/publish`, the endpoint a cron service calls |
 | `LINKEDIN_DRY_RUN` | `false` | Log posts instead of publishing them |
 | `ALLOW_DEV_LOGIN` | `false` | Skip LinkedIn sign-in locally. Never enable this in production |
 | `DEFAULT_MODEL` | `claude-opus-5-5` | Model for new users |
-| `WHISPER_MODEL` | `onnx-community/whisper-base` | Speech-to-text model |
-| `MAX_UPLOAD_MB` | `500` | Per-file upload limit |
+| `MAX_UPLOAD_MB` | `500` (`200` on Vercel) | Per-file upload limit |
 
 ## Development
 
@@ -133,13 +139,18 @@ Project layout:
 ```
 server/
   app.ts            REST API (Express 5)
+  index.ts          self-hosted entry: HTTP server + scheduler timer
+  vercel.ts         Vercel entry (api/index.js loads the compiled build)
+  db.ts             SQLite / Turso via libSQL
+  storage.ts        local disk or private Vercel Blob
   auth.ts           LinkedIn OAuth, sessions, CSRF
   linkedin.ts       LinkedIn API client (posts, images, videos, little-text escaping)
   posts.ts          post storage, validation, publishing
   scheduler.ts      publishes due posts, with retries
   ai/               Claude client, prompts, generation, remix originality check
-  media/            uploads, sharp/ffmpeg processing, Whisper transcription
+  media/            media records and upload checks
 web/src/            React app (Vite + Tailwind)
+  media/            in-browser photo/video processing, uploads, Whisper transcription
 shared/types.ts     types shared by server and web
 tests/
 ```

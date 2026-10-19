@@ -1,8 +1,13 @@
-import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { createClient, type Client, type InArgs } from "@libsql/client";
 import { config } from "./config.js";
+
+// SQLite everywhere: a local file when self-hosted, Turso (hosted libSQL) on Vercel.
 
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed";
 export type MediaKind = "image" | "audio" | "video";
+/** "processing" means the browser hasn't finished transcribing it yet. */
 export type MediaStatus = "processing" | "ready" | "failed";
 
 export interface UserRow {
@@ -28,14 +33,15 @@ export interface MediaRow {
   original_name: string;
   mime: string;
   size: number;
-  path: string;
+  /** Storage key of the file that gets published to LinkedIn. */
+  file_key: string;
   status: MediaStatus;
   error: string | null;
   transcript: string | null;
-  /** JSON array of absolute paths to extracted video frames. */
-  frames: string | null;
+  /** JSON array of storage keys for frames sampled from a video. */
+  frame_keys: string | null;
   /** JPEG resized for Claude's vision input (images) or the video poster frame. */
-  preview_path: string | null;
+  preview_key: string | null;
   duration_s: number | null;
   width: number | null;
   height: number | null;
@@ -74,9 +80,10 @@ export interface InspirationRow {
   created_at: number;
 }
 
+// Idempotent so two serverless instances cold-starting at once can't trip over each other.
 const migrations: string[] = [
   `
-  CREATE TABLE users (
+  CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     linkedin_sub TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
@@ -91,37 +98,37 @@ const migrations: string[] = [
     timezone TEXT,
     created_at INTEGER NOT NULL
   );
-  CREATE TABLE sessions (
+  CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at INTEGER NOT NULL
   );
-  CREATE TABLE profiles (
+  CREATE TABLE IF NOT EXISTS profiles (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     data TEXT NOT NULL DEFAULT '{}',
     updated_at INTEGER NOT NULL
   );
-  CREATE TABLE media (
+  CREATE TABLE IF NOT EXISTS media (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     original_name TEXT NOT NULL,
     mime TEXT NOT NULL,
     size INTEGER NOT NULL,
-    path TEXT NOT NULL,
+    file_key TEXT NOT NULL,
     status TEXT NOT NULL,
     error TEXT,
     transcript TEXT,
-    frames TEXT,
-    preview_path TEXT,
+    frame_keys TEXT,
+    preview_key TEXT,
     duration_s REAL,
     width INTEGER,
     height INTEGER,
     alt_text TEXT,
     created_at INTEGER NOT NULL
   );
-  CREATE INDEX media_user ON media(user_id, created_at DESC);
-  CREATE TABLE inspirations (
+  CREATE INDEX IF NOT EXISTS media_user ON media(user_id, created_at DESC);
+  CREATE TABLE IF NOT EXISTS inspirations (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     source_text TEXT NOT NULL,
@@ -131,7 +138,7 @@ const migrations: string[] = [
     analysis TEXT,
     created_at INTEGER NOT NULL
   );
-  CREATE TABLE posts (
+  CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
@@ -148,36 +155,73 @@ const migrations: string[] = [
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
-  CREATE INDEX posts_user ON posts(user_id, updated_at DESC);
-  CREATE INDEX posts_due ON posts(status, scheduled_at);
+  CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS posts_due ON posts(status, scheduled_at);
   `,
 ];
 
-export function openDatabase(file = config.dbPath): Database.Database {
-  const db = new Database(file);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
-  const version = db.pragma("user_version", { simple: true }) as number;
+async function migrate(client: Client): Promise<void> {
+  await client.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
+  const row = (await client.execute("SELECT MAX(version) AS v FROM schema_version")).rows[0];
+  const version = Number(row?.v ?? 0);
   for (let i = version; i < migrations.length; i++) {
-    db.transaction(() => {
-      db.exec(migrations[i]);
-      db.pragma(`user_version = ${i + 1}`);
-    })();
+    await client.executeMultiple(migrations[i]);
+    await client.execute({ sql: "INSERT INTO schema_version (version) VALUES (?)", args: [i + 1] });
   }
-  return db;
 }
 
-let instance: Database.Database | null = null;
+let client: Client | null = null;
+let ready: Promise<void> | null = null;
 
-export function db(): Database.Database {
-  if (!instance) instance = openDatabase();
-  return instance;
+export function openDatabase(url = config.database.url, authToken = config.database.authToken): Client {
+  if (url.startsWith("file:")) fs.mkdirSync(path.dirname(url.slice("file:".length)), { recursive: true });
+  return createClient({ url, authToken, intMode: "number" });
+}
+
+/** Opens the database and runs migrations once per process. Await before any query. */
+export function dbReady(): Promise<void> {
+  if (!ready) {
+    client ??= openDatabase();
+    ready = (async () => {
+      await client!.execute("PRAGMA foreign_keys = ON").catch(() => undefined);
+      await migrate(client!);
+    })();
+    ready.catch(() => {
+      ready = null;
+    });
+  }
+  return ready;
 }
 
 /** Tests swap in an in-memory database. */
-export function setDatabase(database: Database.Database): void {
-  instance = database;
+export async function setDatabase(c: Client): Promise<void> {
+  client = c;
+  ready = null;
+  await dbReady();
+}
+
+function conn(): Client {
+  if (!client) client = openDatabase();
+  return client;
+}
+
+function toObjects<T>(result: { columns: string[]; rows: ArrayLike<unknown>[] }): T[] {
+  return result.rows.map((row) => Object.fromEntries(result.columns.map((c, i) => [c, row[i]])) as T);
+}
+
+export async function all<T>(sql: string, args: InArgs = []): Promise<T[]> {
+  await dbReady();
+  return toObjects<T>(await conn().execute({ sql, args }));
+}
+
+export async function get<T>(sql: string, args: InArgs = []): Promise<T | undefined> {
+  return (await all<T>(sql, args))[0];
+}
+
+export async function run(sql: string, args: InArgs = []): Promise<{ changes: number; lastId: number }> {
+  await dbReady();
+  const result = await conn().execute({ sql, args });
+  return { changes: result.rowsAffected, lastId: Number(result.lastInsertRowid ?? 0) };
 }
 
 export const now = () => Date.now();

@@ -1,7 +1,3 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import sharp from "sharp";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaRow, UserRow } from "../server/db.js";
 
@@ -16,14 +12,14 @@ vi.mock("../server/ai/claude.js", async (orig) => ({
 }));
 
 const { generatePosts, remixPosts } = await import("../server/ai/generate.js");
+const { storeFile } = await import("./helpers.js");
 
 const user = { id: 1, name: "Ada" } as UserRow;
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "linkmein-gen-"));
-const preview = path.join(dir, "p.jpg");
-await sharp({ create: { width: 10, height: 10, channels: 3, background: "#fff" } }).jpeg().toFile(preview);
+const preview = "u/1/0000aaaa-test/preview.jpg";
+await storeFile(preview, Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
 
 const media = (over: Partial<MediaRow>): MediaRow =>
-  ({ id: 1, kind: "image", original_name: "a.jpg", status: "ready", preview_path: preview, frames: null, transcript: null, duration_s: null, ...over }) as MediaRow;
+  ({ id: 1, kind: "image", original_name: "a.jpg", status: "ready", preview_key: preview, frame_keys: null, transcript: null, duration_s: null, ...over }) as MediaRow;
 
 beforeEach(() => {
   calls.length = 0;
@@ -37,7 +33,7 @@ describe("generatePosts", () => {
       { headline: "Chef", writingSamples: "my old post" },
       [
         media({ id: 1 }),
-        media({ id: 2, kind: "video", frames: JSON.stringify([preview, preview]), transcript: "we opened the kitchen", duration_s: 12 }),
+        media({ id: 2, kind: "video", frame_keys: JSON.stringify([preview, preview]), transcript: "we opened the kitchen", duration_s: 12 }),
         media({ id: 3, kind: "audio", transcript: "voice note about our menu" }),
       ],
       { mediaIds: [1, 2, 3], notes: "Opening week", variations: 2 },
@@ -53,8 +49,8 @@ describe("generatePosts", () => {
     expect(text).toContain("exactly 2 distinct variations");
   });
 
-  it("refuses media that is still processing", async () => {
-    await expect(generatePosts(user, {}, [media({ status: "processing" })], { mediaIds: [1], notes: "" })).rejects.toThrow(/still processing/);
+  it("refuses media that is still being transcribed", async () => {
+    await expect(generatePosts(user, {}, [media({ kind: "audio", status: "processing" })], { mediaIds: [1], notes: "" })).rejects.toThrow(/still being transcribed/);
   });
 
   it("needs something to write about", async () => {

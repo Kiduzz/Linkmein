@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist/web",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 300,
+      "includeFiles": "dist/server/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api" },
+    { "source": "/auth/:path*", "destination": "/api" },
+    { "source": "/((?!api/|auth/|assets/).*)", "destination": "/index.html" }
+  ],
+  "crons": [{ "path": "/api/cron/publish", "schedule": "0 8 * * *" }]
+}

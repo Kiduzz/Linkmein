@@ -1,6 +1,6 @@
 # Host Linkmein for free on Oracle Cloud
 
-Oracle Cloud's **Always Free** tier includes an always-on ARM server with up to 4 CPU cores and 24 GB of memory, at no cost. This is plenty for Linkmein, including local voice transcription. This guide takes about 30–45 minutes the first time.
+Oracle Cloud's **Always Free** tier includes an always-on ARM server with up to 4 CPU cores and 24 GB of memory, at no cost. This is plenty for Linkmein. This guide takes about 30–45 minutes the first time.
 
 What you end up with:
 
@@ -155,4 +155,4 @@ Keep backups private. `app-secret.key` decrypts the stored API keys and LinkedIn
 | The site doesn't load / Caddy logs `failed to obtain certificate` | Ports 80 and 443 must be open in **both** places (step 3 and step 4). Check that `YOUR_DOMAIN` points at the server's IP. On Cloudflare, the record must be **DNS only** (grey cloud). |
 | LinkedIn says `redirect_uri does not match` | `BASE_URL` in `.env` and the redirect URL in your LinkedIn app must match exactly, including `https://`. Run `docker compose --profile https up -d` again after editing `.env`. |
 | You changed `.env` but nothing changed | Run `docker compose --profile https up -d` to restart with the new settings. |
-| Voice notes show "Transcription failed" | The first transcription downloads the speech model (~150 MB). Check `docker compose logs linkmein` for network errors. You can always type the transcript in the Library. |
+| Voice notes show "Transcription failed" | Transcription runs in your browser and downloads the speech model the first time, so check your own internet connection, then click **Transcribe again** in the Library. You can always type the transcript yourself. |

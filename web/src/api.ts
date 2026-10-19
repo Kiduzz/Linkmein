@@ -10,6 +10,23 @@ export interface AppConfig {
   linkedinConfigured: boolean;
   devLogin: boolean;
   models: { id: string; label: string }[];
+  storage: "local" | "blob";
+  maxUploadMb: number;
+}
+
+export interface RegisterMediaInput {
+  kind: Media["kind"];
+  name: string;
+  mime: string;
+  fileKey: string;
+  previewKey?: string;
+  frameKeys?: string[];
+  durationS?: number;
+  width?: number;
+  height?: number;
+  transcript?: string;
+  status: "processing" | "ready";
+  error?: string;
 }
 
 export interface Media {
@@ -78,12 +95,11 @@ export class ApiError extends Error {
 }
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const isForm = body instanceof FormData;
   const res = await fetch(url, {
     method,
     credentials: "same-origin",
-    headers: { "X-Linkmein": "1", ...(body !== undefined && !isForm ? { "Content-Type": "application/json" } : {}) },
-    body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
+    headers: { "X-Linkmein": "1", ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
   if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status);
@@ -104,12 +120,9 @@ export const api = {
 
   media: () => call<Media[]>("GET", "/api/media"),
   mediaOne: (id: number) => call<Media>("GET", `/api/media/${id}`),
-  upload: (files: File[] | Blob[], names?: string[]) => {
-    const form = new FormData();
-    files.forEach((f, i) => form.append("files", f, names?.[i] ?? (f as File).name ?? "upload"));
-    return call<Media[]>("POST", "/api/media", form);
-  },
-  updateMedia: (id: number, patch: { transcript?: string; altText?: string }) => call<Media>("PATCH", `/api/media/${id}`, patch),
+  registerMedia: (m: RegisterMediaInput) => call<Media>("POST", "/api/media", m),
+  updateMedia: (id: number, patch: { transcript?: string; altText?: string; status?: "ready" | "failed"; error?: string | null }) =>
+    call<Media>("PATCH", `/api/media/${id}`, patch),
   deleteMedia: (id: number) => call("DELETE", `/api/media/${id}`),
 
   generate: (opts: GenerateOptions) => call<{ drafts: PostDraft[] }>("POST", "/api/ai/generate", opts),

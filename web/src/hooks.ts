@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Media } from "./api";
+import { onTranscribed } from "./media/transcriber";
 
-/** The user's media library, polled while anything is still processing. */
+/** The user's media library. Refreshes when a transcript lands, and slowly while any are pending (another tab may finish them). */
 export function useMediaLibrary() {
   const [media, setMedia] = useState<Media[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -12,12 +13,14 @@ export function useMediaLibrary() {
     setMedia(list);
     setLoaded(true);
     if (timer.current) clearTimeout(timer.current);
-    if (list.some((m) => m.status === "processing")) timer.current = setTimeout(refresh, 2000);
+    if (list.some((m) => m.status === "processing")) timer.current = setTimeout(refresh, 10_000);
   }, []);
 
   useEffect(() => {
     void refresh();
+    const unsubscribe = onTranscribed(() => void refresh());
     return () => {
+      unsubscribe();
       if (timer.current) clearTimeout(timer.current);
     };
   }, [refresh]);

@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import { z } from "zod";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { InspirationRow, MediaRow, UserRow } from "../db.js";
@@ -6,13 +5,14 @@ import type { GenerateOptions, InspirationAnalysis, PostDraft, Profile, RemixDra
 import { AiError, structured } from "./claude.js";
 import { ghostwriterSystem, lengthGuide, WRITING_RULES } from "./prompts.js";
 import { OVERLAP_LIMIT, overlapScore } from "./originality.js";
+import { readFile } from "../storage.js";
 
 type Block = Anthropic.Beta.BetaContentBlockParam;
 
 const MAX_IMAGES_PER_REQUEST = 24;
 
-async function imageBlock(file: string): Promise<Block> {
-  const data = (await fs.readFile(file)).toString("base64");
+async function imageBlock(key: string): Promise<Block> {
+  const data = (await readFile(key)).toString("base64");
   return { type: "image", source: { type: "base64", media_type: "image/jpeg", data } };
 }
 
@@ -21,15 +21,18 @@ export async function mediaBlocks(media: MediaRow[]): Promise<Block[]> {
   const blocks: Block[] = [];
   let imageBudget = MAX_IMAGES_PER_REQUEST;
   for (const m of media) {
-    if (m.status !== "ready") throw new AiError(`"${m.original_name}" is still processing. Try again in a moment.`, 409);
+    if (m.status === "processing") throw new AiError(`"${m.original_name}" is still being transcribed. Try again in a moment.`, 409);
     const label = `Media #${m.id} (${m.kind}, "${m.original_name}"${m.duration_s ? `, ${Math.round(m.duration_s)}s` : ""})`;
-    if (m.kind === "image" && m.preview_path && imageBudget > 0) {
+    if (m.kind === "image" && m.preview_key && imageBudget > 0) {
       blocks.push({ type: "text", text: `${label}:` });
-      blocks.push(await imageBlock(m.preview_path));
+      blocks.push(await imageBlock(m.preview_key));
       imageBudget--;
     } else if (m.kind === "video") {
-      const frames = (m.frames ? (JSON.parse(m.frames) as string[]) : []).slice(0, Math.max(0, imageBudget));
-      blocks.push({ type: "text", text: `${label}. ${frames.length} frames sampled evenly through the video:` });
+      const frames = (m.frame_keys ? (JSON.parse(m.frame_keys) as string[]) : []).slice(0, Math.max(0, imageBudget));
+      blocks.push({
+        type: "text",
+        text: frames.length ? `${label}. ${frames.length} frames sampled evenly through the video:` : `${label}. (No frames could be extracted from this video.)`,
+      });
       for (const f of frames) blocks.push(await imageBlock(f));
       imageBudget -= frames.length;
       blocks.push({ type: "text", text: transcriptText(m) });
@@ -116,9 +119,9 @@ export async function analyzeInspiration(
   input: { text: string; screenshot?: MediaRow },
 ): Promise<{ text: string; analysis: InspirationAnalysis }> {
   const content: Block[] = [];
-  if (input.screenshot?.preview_path) {
+  if (input.screenshot?.preview_key) {
     content.push({ type: "text", text: "Screenshot of the post:" });
-    content.push(await imageBlock(input.screenshot.preview_path));
+    content.push(await imageBlock(input.screenshot.preview_key));
   }
   if (input.text.trim()) content.push({ type: "text", text: `<post>\n${input.text.trim()}\n</post>` });
   if (!content.length) throw new AiError("Paste a post or upload a screenshot of one.", 400);

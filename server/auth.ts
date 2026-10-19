@@ -1,6 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { config, linkedinConfigured } from "./config.js";
-import { db, now, type UserRow } from "./db.js";
+import { get, now, run, type UserRow } from "./db.js";
 import { randomToken, sha256 } from "./crypto.js";
 import { authorizeUrl, exchangeCode, fetchUserInfo } from "./linkedin.js";
 import { getUser, upsertLinkedInUser } from "./users.js";
@@ -25,22 +25,18 @@ const cookieOptions = () => ({
   path: "/",
 });
 
-export function createSession(res: Response, userId: number): void {
+export async function createSession(res: Response, userId: number): Promise<void> {
   const token = randomToken();
-  db()
-    .prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)")
-    .run(sha256(token), userId, now() + SESSION_TTL_MS);
+  await run("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)", [sha256(token), userId, now() + SESSION_TTL_MS]);
   res.cookie(SESSION_COOKIE, token, { ...cookieOptions(), maxAge: SESSION_TTL_MS });
 }
 
 /** Attaches req.user when the session cookie is valid. */
-export function loadSession(req: Request, _res: Response, next: NextFunction): void {
+export async function loadSession(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const token = req.cookies?.[SESSION_COOKIE];
   if (typeof token === "string" && token) {
-    const row = db()
-      .prepare("SELECT user_id, expires_at FROM sessions WHERE token_hash = ?")
-      .get(sha256(token)) as { user_id: number; expires_at: number } | undefined;
-    if (row && row.expires_at > now()) req.user = getUser(row.user_id);
+    const row = await get<{ user_id: number; expires_at: number }>("SELECT user_id, expires_at FROM sessions WHERE token_hash = ?", [sha256(token)]);
+    if (row && row.expires_at > now()) req.user = await getUser(row.user_id);
   }
   next();
 }
@@ -92,8 +88,8 @@ authRouter.get("/linkedin/callback", async (req, res) => {
   try {
     const tokens = await exchangeCode(code);
     const info = await fetchUserInfo(tokens.accessToken);
-    const user = upsertLinkedInUser(info, tokens);
-    createSession(res, user.id);
+    const user = await upsertLinkedInUser(info, tokens);
+    await createSession(res, user.id);
     res.redirect(`${config.webUrl}/`);
   } catch (err) {
     console.error("LinkedIn sign-in failed", err);
@@ -102,19 +98,19 @@ authRouter.get("/linkedin/callback", async (req, res) => {
 });
 
 /** Local development without a LinkedIn app. Publishing is unavailable for this user unless LINKEDIN_DRY_RUN=true. */
-authRouter.post("/dev-login", (req, res) => {
+authRouter.post("/dev-login", async (_req, res) => {
   if (!config.allowDevLogin) {
     res.status(404).end();
     return;
   }
-  const user = upsertLinkedInUser({ sub: "dev-user", name: "Dev User", email: null, picture: null }, null);
-  createSession(res, user.id);
+  const user = await upsertLinkedInUser({ sub: "dev-user", name: "Dev User", email: null, picture: null }, null);
+  await createSession(res, user.id);
   res.json({ ok: true });
 });
 
-authRouter.post("/logout", (req, res) => {
+authRouter.post("/logout", async (req, res) => {
   const token = req.cookies?.[SESSION_COOKIE];
-  if (typeof token === "string") db().prepare("DELETE FROM sessions WHERE token_hash = ?").run(sha256(token));
+  if (typeof token === "string") await run("DELETE FROM sessions WHERE token_hash = ?", [sha256(token)]);
   res.clearCookie(SESSION_COOKIE, cookieOptions());
   res.json({ ok: true });
 });

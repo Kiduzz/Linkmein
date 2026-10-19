@@ -11,6 +11,7 @@ export default defineConfig({
       APP_SECRET: "test-secret",
       SCHEDULER_INTERVAL_MS: "3600000",
       ALLOW_DEV_LOGIN: "true",
+      CRON_SECRET: "test-cron-secret",
     },
   },
 });

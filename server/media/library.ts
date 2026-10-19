@@ -1,139 +1,118 @@
-import fs from "node:fs/promises";
-import sharp from "sharp";
-import { db, now, type MediaKind, type MediaRow } from "../db.js";
-import { extractFrame, probe } from "./ffmpeg.js";
-import { transcribe } from "./transcribe.js";
+import { all, get, now, run, type MediaKind, type MediaRow, type MediaStatus } from "../db.js";
+import { deleteFiles, ownsKey, sizeOf } from "../storage.js";
+import { config } from "../config.js";
 
-export const ACCEPTED_MIME = /^(image\/(jpeg|png|gif|webp|avif)|audio\/.+|video\/.+)$/;
+// Photos are resized, video frames sampled and speech transcribed in the browser
+// before upload, so the server only records what arrived and checks it's legit.
 
-export function kindFromMime(mime: string): MediaKind | null {
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime.startsWith("video/")) return "video";
-  return null;
+/** What LinkedIn can display. The browser converts other image formats to JPEG first. */
+export const IMAGE_MIME = /^image\/(jpeg|png|gif)$/;
+
+export class MediaError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+  }
 }
 
-/** Claude's vision input is most efficient at or below ~1.15 megapixels; 1568px is the documented long-edge sweet spot. */
-const AI_IMAGE_MAX = 1568;
-
-export function getMedia(userId: number, id: number): MediaRow | undefined {
-  return db().prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(id, userId) as MediaRow | undefined;
+export function getMedia(userId: number, id: number): Promise<MediaRow | undefined> {
+  return get<MediaRow>("SELECT * FROM media WHERE id = ? AND user_id = ?", [id, userId]);
 }
 
-export function getMediaMany(userId: number, ids: number[]): MediaRow[] {
-  const rows = ids.map((id) => getMedia(userId, id));
+export async function getMediaMany(userId: number, ids: number[]): Promise<MediaRow[]> {
+  const rows = await Promise.all(ids.map((id) => getMedia(userId, id)));
   const missing = ids.filter((_, i) => !rows[i]);
-  if (missing.length) throw new Error(`Media not found: ${missing.join(", ")}`);
+  if (missing.length) throw new MediaError(`Media not found: ${missing.join(", ")}`);
   return rows as MediaRow[];
 }
 
-export function listMedia(userId: number): MediaRow[] {
-  return db().prepare("SELECT * FROM media WHERE user_id = ? ORDER BY created_at DESC").all(userId) as MediaRow[];
+export function listMedia(userId: number): Promise<MediaRow[]> {
+  return all<MediaRow>("SELECT * FROM media WHERE user_id = ? ORDER BY created_at DESC", [userId]);
 }
 
-export function insertMedia(
+export interface NewMedia {
+  kind: MediaKind;
+  name: string;
+  mime: string;
+  fileKey: string;
+  previewKey?: string;
+  frameKeys?: string[];
+  durationS?: number;
+  width?: number;
+  height?: number;
+  transcript?: string;
+  /** "processing" while the browser is still transcribing. */
+  status: MediaStatus;
+  error?: string;
+}
+
+export async function registerMedia(userId: number, m: NewMedia): Promise<MediaRow> {
+  const keys = [m.fileKey, m.previewKey, ...(m.frameKeys ?? [])].filter(Boolean) as string[];
+  if (!keys.every((k) => ownsKey(userId, k))) throw new MediaError("Invalid upload key.", 403);
+  if (!m.mime.startsWith(`${m.kind}/`)) throw new MediaError(`A ${m.kind} can't have type ${m.mime}.`);
+  if (m.kind === "image" && !IMAGE_MIME.test(m.mime)) throw new MediaError("Images must be JPEG, PNG or GIF.");
+
+  // Trust the stored bytes, not the browser, for size and existence.
+  const size = await sizeOf(m.fileKey);
+  if (size === null) throw new MediaError("The upload didn't arrive. Please try again.");
+  if (size > config.maxUploadMb * 1024 * 1024) {
+    await deleteFiles(keys);
+    throw new MediaError(`Files are limited to ${config.maxUploadMb} MB.`);
+  }
+
+  const result = await run(
+    `INSERT INTO media (user_id, kind, original_name, mime, size, file_key, status, error, transcript, frame_keys, preview_key, duration_s, width, height, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      userId,
+      m.kind,
+      m.name,
+      m.mime,
+      size,
+      m.fileKey,
+      m.status,
+      m.error ?? null,
+      m.transcript ?? null,
+      m.frameKeys?.length ? JSON.stringify(m.frameKeys) : null,
+      m.previewKey ?? null,
+      m.durationS ?? null,
+      m.width ?? null,
+      m.height ?? null,
+      now(),
+    ],
+  );
+  return (await getMedia(userId, result.lastId))!;
+}
+
+export async function updateMediaDetails(
   userId: number,
-  file: { originalname: string; mimetype: string; size: number; path: string },
-  kind: MediaKind,
-): MediaRow {
-  const result = db()
-    .prepare(
-      `INSERT INTO media (user_id, kind, original_name, mime, size, path, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'processing', ?)`,
-    )
-    .run(userId, kind, file.originalname, file.mimetype, file.size, file.path, now());
-  return getMedia(userId, Number(result.lastInsertRowid))!;
+  id: number,
+  fields: { transcript?: string; alt_text?: string; status?: MediaStatus; error?: string | null },
+): Promise<void> {
+  if (!(await getMedia(userId, id))) throw new MediaError("Media not found", 404);
+  const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
+  if (!entries.length) return;
+  await run(`UPDATE media SET ${entries.map(([k]) => `${k} = ?`).join(", ")} WHERE id = ? AND user_id = ?`, [
+    ...entries.map(([, v]) => v as string | null),
+    id,
+    userId,
+  ]);
 }
 
-function update(id: number, fields: Partial<MediaRow>): void {
-  const keys = Object.keys(fields);
-  if (!keys.length) return;
-  db()
-    .prepare(`UPDATE media SET ${keys.map((k) => `${k} = @${k}`).join(", ")} WHERE id = @id`)
-    .run({ ...fields, id });
-}
-
-export function updateMediaDetails(userId: number, id: number, fields: { transcript?: string; alt_text?: string }): void {
-  if (!getMedia(userId, id)) throw new Error("Media not found");
-  update(id, fields);
-}
-
-async function processImage(m: MediaRow): Promise<Partial<MediaRow>> {
-  const previewPath = `${m.path}.preview.jpg`;
-  const info = await sharp(m.path)
-    .rotate()
-    .resize({ width: AI_IMAGE_MAX, height: AI_IMAGE_MAX, fit: "inside", withoutEnlargement: true })
-    .jpeg({ quality: 85 })
-    .toFile(previewPath);
-  const meta = await sharp(m.path).metadata();
-  return { preview_path: previewPath, width: meta.width ?? info.width, height: meta.height ?? info.height };
-}
-
-function frameTimes(duration: number): number[] {
-  const count = duration < 10 ? 3 : duration < 60 ? 5 : 8;
-  return Array.from({ length: count }, (_, i) => ((i + 0.5) / count) * duration);
-}
-
-async function processVideo(m: MediaRow): Promise<Partial<MediaRow>> {
-  const info = await probe(m.path);
-  const duration = info.durationS ?? 1;
-  const frames: string[] = [];
-  for (const [i, t] of frameTimes(duration).entries()) {
-    const out = `${m.path}.frame${i}.jpg`;
-    try {
-      await extractFrame(m.path, t, out);
-      frames.push(out);
-    } catch (err) {
-      // A seek past the last keyframe can fail on short clips; the other frames are enough.
-      if (!frames.length && i === 0) throw err;
-    }
-  }
-  const transcript = info.hasAudio ? await transcribeSafely(m.path) : null;
-  return {
-    duration_s: info.durationS,
-    width: info.width,
-    height: info.height,
-    frames: JSON.stringify(frames),
-    preview_path: frames[0] ?? null,
-    ...transcript,
-  };
-}
-
-async function processAudio(m: MediaRow): Promise<Partial<MediaRow>> {
-  const info = await probe(m.path);
-  return { duration_s: info.durationS, ...(await transcribeSafely(m.path)) };
-}
-
-/** A failed transcription shouldn't fail the upload: the user can type or fix the transcript. */
-async function transcribeSafely(file: string): Promise<Partial<Pick<MediaRow, "transcript" | "error">>> {
-  try {
-    return { transcript: await transcribe(file) };
-  } catch (err) {
-    console.warn("Transcription failed", err);
-    return { transcript: "", error: `Transcription failed: ${(err as Error).message}. You can type the transcript yourself.` };
-  }
-}
-
-export async function processMedia(m: MediaRow): Promise<void> {
-  try {
-    const fields =
-      m.kind === "image" ? await processImage(m) : m.kind === "video" ? await processVideo(m) : await processAudio(m);
-    update(m.id, { ...fields, status: "ready" });
-  } catch (err) {
-    console.error(`Processing media ${m.id} failed`, err);
-    update(m.id, { status: "failed", error: (err as Error).message });
-  }
+export function mediaKeys(m: MediaRow): string[] {
+  return [m.file_key, m.preview_key, ...(m.frame_keys ? (JSON.parse(m.frame_keys) as string[]) : [])].filter(Boolean) as string[];
 }
 
 export async function deleteMedia(userId: number, id: number): Promise<void> {
-  const m = getMedia(userId, id);
+  const m = await getMedia(userId, id);
   if (!m) return;
-  db().prepare("DELETE FROM media WHERE id = ?").run(id);
-  const files = [m.path, m.preview_path, ...(m.frames ? (JSON.parse(m.frames) as string[]) : [])].filter(Boolean) as string[];
-  await Promise.all([...new Set(files)].map((f) => fs.rm(f, { force: true })));
+  await run("DELETE FROM media WHERE id = ?", [id]);
+  await deleteFiles(mediaKeys(m));
 }
 
-/** What the browser sees: no filesystem paths. */
+/** What the browser sees: no storage keys. */
 export function publicMedia(m: MediaRow) {
   return {
     id: m.id,
@@ -148,7 +127,7 @@ export function publicMedia(m: MediaRow) {
     durationS: m.duration_s,
     width: m.width,
     height: m.height,
-    hasPreview: Boolean(m.preview_path),
+    hasPreview: Boolean(m.preview_key),
     createdAt: m.created_at,
   };
 }
