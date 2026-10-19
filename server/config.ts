@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
+// Load .env when present (real environment variables win).
+if (fs.existsSync(".env")) process.loadEnvFile(".env");
+
 function env(name: string, fallback = ""): string {
   const value = process.env[name];
   return value === undefined || value === "" ? fallback : value;

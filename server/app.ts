@@ -362,9 +362,9 @@ export function createApp() {
 
   app.use("/api", api);
 
-  // Serve the built web app in production.
+  // The compiled server (dist/server) serves the built web app from dist/web. In dev, Vite serves it.
   const webDir = path.resolve(import.meta.dirname, "../web");
-  if (config.isProduction && fs.existsSync(path.join(webDir, "index.html"))) {
+  if (import.meta.filename.endsWith(".js") && fs.existsSync(path.join(webDir, "index.html"))) {
     app.use(express.static(webDir, { index: false, maxAge: "1h" }));
     app.get(/^(?!\/(api|auth)\/).*/, (_req, res) => res.sendFile(path.join(webDir, "index.html")));
   }
