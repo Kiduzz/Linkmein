@@ -54,14 +54,18 @@ npm run build
 npm start                   # serves the app and API on $PORT
 ```
 
-Or with Docker:
+Or with Docker, including automatic HTTPS through Caddy:
 
 ```bash
-cp .env.example .env        # set BASE_URL to your public https URL
-docker compose up -d --build
+cp .env.example .env        # set DOMAIN and BASE_URL=https://<DOMAIN>
+docker compose --profile https up -d --build
 ```
 
-Run it behind HTTPS (Caddy, nginx, Cloudflare Tunnel and so on). Everything is stored in `DATA_DIR`: the SQLite database, uploads, the Whisper model, and the generated `app-secret.key`. Back that directory up.
+Everything is stored in `DATA_DIR`: the SQLite database, uploads, the Whisper model, and the generated `app-secret.key`. Back that directory up.
+
+### Free hosting
+
+Linkmein needs a server that stays on, so scheduled posts go out when you're offline. Serverless platforms like Vercel, Netlify or Cloudflare Workers won't run it. **[Oracle Cloud's Always Free tier](docs/deploy-oracle.md)** gives you a free always-on server that runs it well. The guide walks through every step.
 
 ## Create a LinkedIn app
 

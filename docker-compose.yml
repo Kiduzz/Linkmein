@@ -1,11 +1,32 @@
 services:
   linkmein:
     build: .
+    # Only reachable from this machine; Caddy (below) is the public entrance.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file: .env
     environment:
       DATA_DIR: /data
     volumes:
       - ./data:/data
     restart: unless-stopped
+
+  # Automatic HTTPS. Start it with: docker compose --profile https up -d
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - linkmein
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
