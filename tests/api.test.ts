@@ -36,6 +36,11 @@ describe("sessions", () => {
 });
 
 describe("API", () => {
+  it("sends a share that missed the service worker to Remix", async () => {
+    const res = await request(app).post("/share-target").attach("screenshots", Buffer.from("x"), "a.png").expect(303);
+    expect(res.headers.location).toBe("/remix?shared=failed");
+  });
+
   it("requires a session and the CSRF header", async () => {
     await request(app).get("/api/me").expect(401);
     const { agent } = await login();

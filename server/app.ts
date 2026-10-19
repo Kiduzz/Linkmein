@@ -64,6 +64,10 @@ export function createApp() {
     res.json({ ok: true, ...(await runDue(Date.now(), 4 * 60_000)) });
   });
 
+  // Android's share sheet posts here. The service worker normally answers it on the phone;
+  // this only runs if it isn't installed yet, so send the person to Remix to pick the files instead.
+  app.post("/share-target", (_req, res) => res.redirect(303, "/remix?shared=failed"));
+
   // Local storage: the browser PUTs file bytes here. Mounted before express.json so the body stays a stream.
   app.put("/api/uploads/{*key}", cookieParser(), loadSession, requireCsrfHeader, requireUser, async (req, res) => {
     if (config.storage !== "local") throw new QueueError(404, "Uploads go to Vercel Blob on this server.");

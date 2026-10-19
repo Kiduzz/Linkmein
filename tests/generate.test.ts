@@ -12,7 +12,7 @@ vi.mock("../web/src/ai/claude", async (orig) => ({
   }),
 }));
 
-const { checkHook, generatePosts, remixPosts, replaceOpening } = await import("../web/src/ai/generate");
+const { analyzeInspiration, checkHook, generatePosts, remixPosts, replaceOpening } = await import("../web/src/ai/generate");
 
 const user: AiContext = { name: "Ada", apiKey: "sk-test", model: "claude-opus-5-5" };
 const preview = new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: "image/jpeg" });
@@ -59,7 +59,7 @@ describe("generatePosts", () => {
 
 describe("remixPosts", () => {
   const source = "I got rejected from 40 jobs last year. Here is what the 41st application taught me about writing a resume that works.";
-  const inspiration = { id: 1, text: source, author: "Someone", url: null, screenshotMediaId: null, analysis: null, createdAt: 0 };
+  const inspiration = { id: 1, text: source, author: "Someone", url: null, screenshotMediaIds: [], analysis: null, createdAt: 0 };
 
   it("scores overlap and retries drafts that copy the reference", async () => {
     let n = 0;
@@ -72,6 +72,34 @@ describe("remixPosts", () => {
     expect(calls[1].content.at(-1).text).toMatch(/reused too much wording/);
     expect(drafts.map((d) => d.angle)).toEqual(["rewrite", "fresh"]);
     expect(drafts.every((d) => d.overlap < 0.12)).toBe(true);
+  });
+});
+
+describe("analyzeInspiration", () => {
+  const analysis = { topic: "t", hookStyle: "h", structure: [], tone: "t", formatting: "f", whyItWorks: "w", approximateWords: 100 };
+
+  it("labels several screenshots in order and asks Claude to stitch them", async () => {
+    reply = { extractedText: " Full post text ", author: "Grace Hopper", analysis };
+    const out = await analyzeInspiration(user, { text: "", screenshots: [media({ id: 4 }), media({ id: 5 }), media({ id: 6, preview: null })] });
+    const { content } = calls[0];
+    expect(content.filter((b) => b.type === "image")).toHaveLength(2);
+    const text = content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    expect(text).toContain("Screenshot 1 of 2:");
+    expect(text).toContain("Screenshot 2 of 2:");
+    expect(text).toMatch(/overlapping lines only once/);
+    expect(out).toEqual({ text: "Full post text", author: "Grace Hopper", analysis });
+  });
+
+  it("keeps pasted text and reports a missing author as null", async () => {
+    reply = { extractedText: "ignored", author: " ", analysis };
+    const out = await analyzeInspiration(user, { text: "My pasted post" });
+    expect(calls[0].content.some((b) => b.type === "image")).toBe(false);
+    expect(out.text).toBe("My pasted post");
+    expect(out.author).toBeNull();
+  });
+
+  it("needs a post or a screenshot", async () => {
+    await expect(analyzeInspiration(user, { text: " ", screenshots: [] })).rejects.toThrow(/screenshots/);
   });
 });
 

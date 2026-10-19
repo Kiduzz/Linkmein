@@ -66,7 +66,10 @@ export interface Inspiration {
   text: string;
   author: string | null;
   url: string | null;
-  screenshotMediaId: number | null;
+  /** Screenshots of the post, in reading order. */
+  screenshotMediaIds: number[];
+  /** Records saved before several screenshots were supported. */
+  screenshotMediaId?: number | null;
   analysis: InspirationAnalysis | null;
   createdAt: number;
 }
@@ -331,16 +334,19 @@ export const api = {
   },
 
   async inspirations(): Promise<Inspiration[]> {
-    return (await (await db()).getAll("inspirations")).sort((a, b) => b.createdAt - a.createdAt);
+    const all = await (await db()).getAll("inspirations");
+    return all
+      .map((i) => ({ ...i, screenshotMediaIds: i.screenshotMediaIds ?? (i.screenshotMediaId ? [i.screenshotMediaId] : []) }))
+      .sort((a, b) => b.createdAt - a.createdAt);
   },
-  async addInspiration(i: { text: string; author?: string; url?: string; screenshotMediaId?: number }): Promise<Inspiration> {
-    const screenshot = i.screenshotMediaId ? (await storedMedia([i.screenshotMediaId]))[0] : undefined;
-    const { text, analysis } = await analyzeInspiration(await aiContext(), { text: i.text, screenshot });
+  async addInspiration(i: { text: string; author?: string; url?: string; screenshotMediaIds?: number[] }): Promise<Inspiration> {
+    const screenshots = await storedMedia(i.screenshotMediaIds ?? []);
+    const { text, author, analysis } = await analyzeInspiration(await aiContext(), { text: i.text, screenshots });
     return addRecord("inspirations", {
       text,
-      author: i.author || null,
+      author: i.author?.trim() || author || null,
       url: i.url || null,
-      screenshotMediaId: screenshot?.id ?? null,
+      screenshotMediaIds: screenshots.map((m) => m.id),
       analysis,
       createdAt: Date.now(),
     });

@@ -109,7 +109,8 @@ export async function generatePosts(
 }
 
 const AnalysisSchema = z.object({
-  extractedText: z.string().describe("The full text of the post being analyzed, transcribed exactly from the screenshot if one was given"),
+  extractedText: z.string().describe("The full text of the post being analyzed, transcribed exactly from the screenshots if any were given"),
+  author: z.string().describe("The post author's name as shown in the screenshots, or an empty string if it isn't visible"),
   analysis: z.object({
     topic: z.string(),
     hookStyle: z.string().describe("How the opening line earns attention"),
@@ -123,15 +124,21 @@ const AnalysisSchema = z.object({
 
 export async function analyzeInspiration(
   ctx: AiContext,
-  input: { text: string; screenshot?: StoredMedia },
-): Promise<{ text: string; analysis: InspirationAnalysis }> {
+  input: { text: string; screenshots?: StoredMedia[] },
+): Promise<{ text: string; author: string | null; analysis: InspirationAnalysis }> {
   const content: Block[] = [];
-  if (input.screenshot?.preview) {
-    content.push({ type: "text", text: "Screenshot of the post:" });
-    content.push(await imageBlock(input.screenshot.preview));
+  const shots = (input.screenshots ?? []).filter((m) => m.preview);
+  for (const [i, shot] of shots.entries()) {
+    content.push({ type: "text", text: shots.length > 1 ? `Screenshot ${i + 1} of ${shots.length}:` : "Screenshot of the post:" });
+    content.push(await imageBlock(shot.preview!));
   }
+  if (shots.length > 1)
+    content.push({
+      type: "text",
+      text: "These screenshots show one post, scrolled from top to bottom. Stitch them into the full text in reading order: consecutive screenshots usually overlap, so include overlapping lines only once. If they seem out of order, use the overlap to put them right. Leave out app chrome such as buttons, reaction counts and comments.",
+    });
   if (input.text.trim()) content.push({ type: "text", text: `<post>\n${input.text.trim()}\n</post>` });
-  if (!content.length) throw new AiError("Paste a post or upload a screenshot of one.", 400);
+  if (!content.length) throw new AiError("Paste a post or add screenshots of it.", 400);
   content.push({
     type: "text",
     text: "Break down why this LinkedIn post works so its techniques can be reused in an original post on a different subject. Focus on transferable craft (hook, structure, pacing, formatting), not its specific content.",
@@ -143,7 +150,7 @@ export async function analyzeInspiration(
     schema: AnalysisSchema,
     effort: "low",
   });
-  return { text: input.text.trim() || out.extractedText.trim(), analysis: out.analysis };
+  return { text: input.text.trim() || out.extractedText.trim(), author: out.author.trim() || null, analysis: out.analysis };
 }
 
 const RemixSchema = z.object({ drafts: z.array(DraftSchema) });
